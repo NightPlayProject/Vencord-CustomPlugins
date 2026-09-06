@@ -55,7 +55,7 @@ public partial class MainWindow : Window
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
         AppendLog($"Custom Vencord Manager v{AppInfo.CurrentVersion} started.");
-        AppendLog($"Managed root: {ManagerPaths.Root}");
+        AppendLog("Managed installation storage ready.");
         await RecoverInterruptedOperationsAsync();
         await CheckForUpdatesAsync(showSuccessDialog: false);
     }

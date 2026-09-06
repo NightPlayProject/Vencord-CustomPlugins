@@ -336,7 +336,7 @@
                                 <TextBlock Margin="0,6,0,0"
                                            FontSize="13.5"
                                            Foreground="{StaticResource TextMutedBrush}"
-                                           Text="Verified releases, safe rollback, and one-click repairs from NightPlayProject." />
+                                           Text="Verified releases, safe rollback, and one-click repairs." />
                             </StackPanel>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                                 <Button x:Name="ManagerUpdateButton"

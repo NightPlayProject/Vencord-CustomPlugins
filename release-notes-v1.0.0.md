@@ -44,3 +44,10 @@ Initial public distribution release.
 - Keeps a Discord client closed when rollback/recovery cannot be verified instead of restarting a potentially broken installation.
 - Adds a single-instance manager guard and blocks closing the manager while a critical Vencord mutation is active.
 - Removes automatic example-plugin writes from install/repair so a single-client operation does not silently change the shared runtime plugins folder.
+
+## Manager v0.1.4
+
+- Fixes false **"Could not fully close Discord"** errors after the selected Discord client had already visibly exited.
+- Waits for the selected Stable/PTB/Canary process family to settle, filters already-exited process objects, and retries late-spawned Discord processes before reporting a real close failure.
+- Only asks the user to use Task Manager when the selected Discord client is still genuinely running after the verified close timeout.
+- Removes repository-owner branding from the visible manager header, activity startup text, and Windows EXE metadata.
