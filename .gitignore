@@ -1,5 +1,7 @@
 *.zip
 *.exe
+*.pdb
 bin/
 obj/
+publish/
 .vs/

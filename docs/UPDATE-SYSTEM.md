@@ -1,4 +1,4 @@
-﻿# Update System
+# Update System
 
 `update-manifest.json` is the stable-channel source of truth for installed clients.
 
@@ -16,3 +16,9 @@ The updater should:
 10. Restart Discord only after a successful update.
 
 The release version, URLs and hashes must be updated together for every publication.
+
+## Manager updates
+
+The manifest can also contain a top-level `manager` object with its own version, download URL and SHA-256. When that version is newer than the running manager, the UI offers a manager update. The replacement executable is downloaded and verified first, then a short-lived helper replaces the manager after the current process exits and starts the new build.
+
+The manager executable itself is published as a GitHub Release asset; it is not committed to the repository.

@@ -1,4 +1,4 @@
-﻿{
+{
   "schema": 1,
   "channel": "stable",
   "version": "1.0.0",
@@ -23,6 +23,14 @@
       "name": "Vencord-CustomPlugins-source.zip",
       "url": "https://github.com/NightPlayProject/Vencord-CustomPlugins/releases/download/v1.0.0/Vencord-CustomPlugins-source.zip",
       "sha256": "88287D5DC0CD38A3A5E1331A63ED79EAE4E5160CE495BF7739DBBD51FF2EA0CD"
+    }
+  },
+  "manager": {
+    "version": "0.1.0",
+    "asset": {
+      "name": "VencordCustomManager.exe",
+      "url": "https://github.com/NightPlayProject/Vencord-CustomPlugins/releases/download/v1.0.0/VencordCustomManager.exe",
+      "sha256": "C48FD709E23556CEA8890602F0A427495D951E17FD5DC970EFFBBAF151D3B75D"
     }
   }
 }
