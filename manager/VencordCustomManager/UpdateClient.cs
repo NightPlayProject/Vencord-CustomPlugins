@@ -91,6 +91,8 @@ public sealed class UpdateClient : IDisposable
             throw new InvalidDataException($"Unsupported update manifest schema: {manifest.Schema}");
         if (string.IsNullOrWhiteSpace(manifest.Version))
             throw new InvalidDataException("The update manifest has no version.");
+        if (!Version.TryParse(manifest.Version.Trim().TrimStart('v', 'V'), out _))
+            throw new InvalidDataException($"The update manifest contains an invalid version: {manifest.Version}");
         if (!Uri.TryCreate(manifest.Assets.WindowsRelease.Url, UriKind.Absolute, out var assetUri) || assetUri.Scheme != Uri.UriSchemeHttps)
             throw new InvalidDataException("The Windows release URL in the update manifest is invalid.");
         if (manifest.Assets.WindowsRelease.Sha256.Length != 64)

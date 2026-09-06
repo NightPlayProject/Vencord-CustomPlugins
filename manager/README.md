@@ -9,24 +9,27 @@
 - verifies the package SHA-256 before extraction
 - verifies the selected Discord installation before contacting GitHub
 - detects existing Vencord injections and whether they point to this manager's build
-- installs into `%LOCALAPPDATA%\NightPlayProject\VencordCustomPlugins\current`
-- closes and restarts Discord when required
-- keeps rollback backups during updates
+- installs separate payloads into `%LOCALAPPDATA%\NightPlayProject\VencordCustomPlugins\clients\stable|ptb|canary`
+- closes and restarts only the selected Discord client when required
+- keeps per-client rollback backups during updates
 - injects/repairs/uninstalls using the same small `app.asar` patch method used by the Vencord installer
 - verifies the Discord injection target again before reporting success
 - detects Discord Stable, PTB, and Canary independently and shows a live status for each client
-- reuses an already-current managed build when adding Custom Vencord to another Discord channel
-- keeps the shared managed build when one Discord channel is uninstalled but another still uses it
-- re-verifies every Discord channel using the shared build after a build update
+- keeps install/update/repair/uninstall isolated to the explicitly selected Discord client
+- refuses destructive Auto-mode actions when multiple Discord clients are installed
+- migrates legacy v0.1.0-v0.1.2 shared-payload installs one client at a time
+- journals patch/unpatch operations and recovers interrupted `app.asar` rename states before allowing more mutations
+- verifies per-file SHA-256 fingerprints for managed payload files before treating them as healthy
+- keeps state/metadata writes atomic with rollback copies
 - uses eased wheel scrolling for the dashboard and activity log
 - preserves `%APPDATA%\Vencord\plugins`
 - supports self-updates through the optional `manager` section of the manifest
 
 ## Recovery
 
-If Discord was already patched successfully but the manager was interrupted before it could save `manager-state.json`, the next launch detects the local injection first. If it points to the manager-owned `dist\patcher.js`, the manager recovers its state from local metadata or from the installed package after the manifest is loaded.
+If the manager is interrupted during install/update/repair/attach/uninstall, the next launch detects the per-client pending-operation journal before normal state recovery. It closes only that Discord client, restores or completes the exact recorded `app-*\resources` transaction, verifies the result, and only then clears the journal and restarts the client.
 
-New installs also write `.manager-install.json` inside the managed install folder before Discord is patched, so future interrupted installs can recover their distribution version without relying only on the external update state.
+New installs write `.manager-install.json` beside each client payload with per-file SHA-256 fingerprints, so local corruption is not treated as a verified installation merely because a version string or `patcher.js` exists.
 
 ## UI
 

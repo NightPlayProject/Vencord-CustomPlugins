@@ -12,34 +12,44 @@ public sealed class DiscordService
     ];
 
     public async Task<IReadOnlyList<DiscordRestartTarget>> StopRunningAsync(
+        string branch,
         IProgress<OperationProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        branch = NormalizeExactBranch(branch);
         var restartTargets = new List<DiscordRestartTarget>();
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var variant = Variants.First(x => x.Branch.Equals(branch, StringComparison.OrdinalIgnoreCase));
+        cancellationToken.ThrowIfCancellationRequested();
+        var processes = Process.GetProcessesByName(variant.Process);
+        if (processes.Length == 0) return restartTargets;
 
-        foreach (var variant in Variants)
+        var updateExe = Path.Combine(localAppData, variant.Folder, "Update.exe");
+        if (File.Exists(updateExe))
+            restartTargets.Add(new DiscordRestartTarget(variant.Branch, updateExe, variant.Process + ".exe"));
+
+        progress?.Report(new OperationProgress($"Closing {variant.Process}…"));
+        foreach (var process in processes)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var processes = Process.GetProcessesByName(variant.Process);
-            if (processes.Length == 0) continue;
-
-            var updateExe = Path.Combine(localAppData, variant.Folder, "Update.exe");
-            if (File.Exists(updateExe))
-                restartTargets.Add(new DiscordRestartTarget(variant.Branch, updateExe, variant.Process + ".exe"));
-
-            progress?.Report(new OperationProgress($"Closing {variant.Process}…"));
-            foreach (var process in processes)
+            try
             {
-                try
-                {
-                    process.Kill(entireProcessTree: true);
-                    await process.WaitForExitAsync(cancellationToken);
-                }
-                catch (InvalidOperationException) { }
-                catch (System.ComponentModel.Win32Exception) { }
-                finally { process.Dispose(); }
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync(cancellationToken);
             }
+            catch (InvalidOperationException) { }
+            catch (System.ComponentModel.Win32Exception) { }
+            finally { process.Dispose(); }
+        }
+
+        var stillRunning = Process.GetProcessesByName(variant.Process);
+        try
+        {
+            if (stillRunning.Length > 0)
+                throw new InvalidOperationException($"Could not fully close {variant.Process}. Close it manually and try again.");
+        }
+        finally
+        {
+            foreach (var process in stillRunning) process.Dispose();
         }
 
         // Give Squirrel/Discord child processes a moment to release loaded files.
@@ -67,4 +77,12 @@ public sealed class DiscordService
             }
         }
     }
+
+    private static string NormalizeExactBranch(string branch) => branch.ToLowerInvariant() switch
+    {
+        "stable" => "stable",
+        "ptb" => "ptb",
+        "canary" => "canary",
+        _ => throw new ArgumentOutOfRangeException(nameof(branch), "A specific Discord client is required.")
+    };
 }

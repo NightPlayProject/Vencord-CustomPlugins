@@ -19,16 +19,22 @@ The manager can:
 - open the runtime plugin and managed-install folders
 - uninstall Custom Vencord while preserving `%APPDATA%\Vencord\plugins`
 
-The managed Vencord files live under:
+Each Discord client now has its own managed Vencord payload under:
 
-`%LOCALAPPDATA%\NightPlayProject\VencordCustomPlugins\current`
+`%LOCALAPPDATA%\NightPlayProject\VencordCustomPlugins\clients\stable`
+
+`%LOCALAPPDATA%\NightPlayProject\VencordCustomPlugins\clients\ptb`
+
+`%LOCALAPPDATA%\NightPlayProject\VencordCustomPlugins\clients\canary`
+
+The old `current` directory is kept only as a migration source for v0.1.0-v0.1.2 installs until no Discord client still references it.
 
 Once the manager is installed, future releases are discovered through `update-manifest.json`; users should not need you to resend ZIP files.
 
 ## Current release
 
 - Distribution: **v1.0.0**
-- Custom Vencord Manager: **v0.1.2**
+- Custom Vencord Manager: **v0.1.3**
 - Vencord base: **1.15.4** (`0e40e433`)
 - OrionQuests: **v4.10.12**
 - Runtime custom-plugin loader: included

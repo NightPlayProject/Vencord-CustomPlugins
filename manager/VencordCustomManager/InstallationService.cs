@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace VencordCustomManager;
@@ -13,8 +14,8 @@ public sealed class InstallationService : IDisposable
 
     public InstallationService()
     {
-        SelfUpdater = new SelfUpdateService(_updateClient);
         ManagerPaths.EnsureCreated();
+        SelfUpdater = new SelfUpdateService(_updateClient);
     }
 
     public Task<UpdateManifest> GetManifestAsync(CancellationToken cancellationToken = default) =>
@@ -22,70 +23,187 @@ public sealed class InstallationService : IDisposable
 
     public ManagerState LoadState()
     {
-        try
+        ManagerState state;
+        if (!TryReadJson(ManagerPaths.StateFile, out state))
         {
-            if (!File.Exists(ManagerPaths.StateFile)) return new ManagerState();
-            var json = File.ReadAllText(ManagerPaths.StateFile);
-            return JsonSerializer.Deserialize<ManagerState>(json, JsonOptions) ?? new ManagerState();
+            if (!TryReadJson(ManagerPaths.StateFile + ".bak", out state))
+                state = new ManagerState();
         }
-        catch
+
+        // JSON deserialization does not preserve the dictionary comparer from the initializer.
+        var normalizedClients = new Dictionary<string, ClientInstallState>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in state.Clients ?? new Dictionary<string, ClientInstallState>())
         {
-            return new ManagerState();
+            var client = pair.Value ?? new ClientInstallState();
+            client.InstalledVersion = NormalizeStoredVersion(client.InstalledVersion);
+            normalizedClients[NormalizeStateBranch(pair.Key)] = client;
         }
+        state.Clients = normalizedClients;
+        state.InstalledVersion = NormalizeStoredVersion(state.InstalledVersion);
+
+        MigrateLegacyState(state);
+        return state;
     }
 
-    public bool IsInstalled(ManagerState? state = null)
+    public ClientInstallState GetClientState(string branch, ManagerState? state = null)
     {
+        branch = NormalizeExactBranch(branch);
         state ??= LoadState();
-        return IsInstalled(state.DiscordBranch, state);
+        if (!state.Clients.TryGetValue(branch, out var client))
+        {
+            client = new ClientInstallState();
+            state.Clients[branch] = client;
+        }
+        return client;
     }
+
+    public string GetInstalledVersion(string branch, ManagerState? state = null) =>
+        GetClientState(branch, state).InstalledVersion;
 
     public bool IsInstalled(string branch, ManagerState? state = null)
     {
+        branch = NormalizeExactBranch(branch);
         state ??= LoadState();
-        return !string.IsNullOrWhiteSpace(state.InstalledVersion)
-            && HasManagedFiles()
-            && _patchService.Probe(branch)?.IsManagedPatch == true;
+        var client = GetClientState(branch, state);
+        return !string.IsNullOrWhiteSpace(client.InstalledVersion)
+            && HasManagedFiles(branch)
+            && _patchService.Probe(branch)?.IsBranchScopedManagedPatch == true;
     }
 
-    public bool HasManagedFiles() =>
-        Directory.Exists(ManagerPaths.InstallDirectory)
-        && File.Exists(Path.Combine(ManagerPaths.InstallDirectory, "dist", "renderer.js"))
-        && File.Exists(Path.Combine(ManagerPaths.InstallDirectory, "dist", "patcher.js"));
+    public bool HasManagedFiles(string branch)
+    {
+        branch = NormalizeExactBranch(branch);
+        return HasPayloadFiles(ManagerPaths.GetInstallDirectory(branch));
+    }
+
+    public bool HasLegacyManagedFiles() => HasPayloadFiles(ManagerPaths.LegacyInstallDirectory);
+
+    public bool HasAnyManagedFiles() =>
+        HasLegacyManagedFiles() || new[] { "stable", "ptb", "canary" }.Any(HasManagedFiles);
+
+    public bool HasUsableManagedPayload(DiscordInstallProbe? probe)
+    {
+        if (probe?.IsBranchScopedManagedPatch == true)
+            return HasManagedFiles(probe.Branch) && VerifyManagedPayloadIntegrity(probe.Branch);
+        if (probe?.IsLegacyManagedPatch == true) return HasLegacyManagedFiles();
+        return false;
+    }
+
+    public bool VerifyManagedPayloadIntegrity(string branch)
+    {
+        branch = NormalizeExactBranch(branch);
+        var directory = ManagerPaths.GetInstallDirectory(branch);
+        if (!HasPayloadFiles(directory)) return false;
+        var metadata = LoadInstallMetadata(ManagerPaths.GetInstallMetadataFile(branch));
+        return metadata is not null && VerifyPayloadHashes(directory, metadata.FileSha256);
+    }
+
+    public string GetManagedInstallDirectoryForBranch(string branch)
+    {
+        branch = NormalizeExactBranch(branch);
+        var probe = _patchService.Probe(branch);
+        if (probe?.IsBranchScopedManagedPatch == true && HasManagedFiles(branch))
+            return ManagerPaths.GetInstallDirectory(branch);
+        if (probe?.IsLegacyManagedPatch == true && HasLegacyManagedFiles())
+            return ManagerPaths.LegacyInstallDirectory;
+        if (HasManagedFiles(branch)) return ManagerPaths.GetInstallDirectory(branch);
+        return ManagerPaths.Root;
+    }
 
     public DiscordInstallProbe? ProbeLocalInstallation(string branch) => _patchService.Probe(branch);
 
     public IReadOnlyList<DiscordInstallProbe> ProbeAllLocalInstallations() => _patchService.ProbeAll();
 
+    public IReadOnlyList<string> GetPendingRecoveryBranches() =>
+        new[] { "stable", "ptb", "canary" }
+            .Where(branch =>
+            {
+                var path = ManagerPaths.GetPendingOperationFile(branch);
+                return File.Exists(path) || File.Exists(path + ".bak");
+            })
+            .ToArray();
+
+    public bool HasPendingRecovery(string branch)
+    {
+        var path = ManagerPaths.GetPendingOperationFile(NormalizeExactBranch(branch));
+        return File.Exists(path) || File.Exists(path + ".bak");
+    }
+
+    public async Task RecoverInterruptedOperationAsync(
+        string branch,
+        IProgress<OperationProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        branch = NormalizeExactBranch(branch);
+        var journalPath = ManagerPaths.GetPendingOperationFile(branch);
+        if (!TryReadJson(journalPath, out PendingOperationJournal journal)
+            && !TryReadJson(journalPath + ".bak", out journal))
+        {
+            throw new InvalidDataException(
+                $"The interrupted-operation journal for {DisplayBranch(branch)} is unreadable. " +
+                "The manager will not modify that client until the journal can be recovered or removed manually.");
+        }
+
+        IReadOnlyList<DiscordRestartTarget> restartTargets = Array.Empty<DiscordRestartTarget>();
+        var restartSafe = true;
+        try
+        {
+            progress?.Report(new OperationProgress($"Recovering interrupted operation for {DisplayBranch(branch)}…"));
+            restartTargets = await _discordService.StopRunningAsync(branch, progress, cancellationToken);
+            bool recovered;
+            try
+            {
+                recovered = RecoverPendingJournal(branch, journal, progress);
+            }
+            catch
+            {
+                restartSafe = false;
+                throw;
+            }
+            if (!recovered)
+            {
+                restartSafe = false;
+                throw new InvalidOperationException(
+                    $"Automatic recovery for {DisplayBranch(branch)} could not be verified. The client will remain closed until it is repaired manually.");
+            }
+
+            DeletePendingOperation(branch);
+            TryRemoveLegacyPayloadIfUnused(branch, progress);
+            progress?.Report(new OperationProgress($"Interrupted {DisplayBranch(branch)} operation recovered and verified.", 100));
+        }
+        finally
+        {
+            if (restartSafe)
+                _discordService.Restart(restartTargets);
+            else
+                progress?.Report(new OperationProgress($"{DisplayBranch(branch)} was left closed because recovery was not verified."));
+        }
+    }
+
     public ManagerState RecoverStateFromLocalInstallation(string branch, UpdateManifest? manifest = null)
     {
         var state = LoadState();
-        var probe = _patchService.Probe(branch);
-        if (probe?.IsManagedPatch != true)
-            probe = _patchService.ProbeAll().FirstOrDefault(x => x.IsManagedPatch);
-        if (probe?.IsManagedPatch != true || !HasManagedFiles()) return state;
+        var normalized = NormalizeBranchPreference(branch);
+        if (normalized == "auto")
+            return RecoverAllStateFromLocalInstallations(manifest, state);
 
-        var metadata = LoadInstallMetadata();
-        var version = state.InstalledVersion;
-        if (string.IsNullOrWhiteSpace(version))
-            version = metadata?.DistributionVersion ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(version) && manifest is not null && LocalPackageMatchesManifest(manifest))
-            version = manifest.Version;
+        if (HasPendingRecovery(normalized)) return state;
 
-        if (string.IsNullOrWhiteSpace(version)) return state;
-
-        var now = DateTimeOffset.UtcNow;
-        state.InstalledVersion = version;
-        state.InstalledAt ??= metadata?.PreparedAt ?? now;
-        state.LastVerifiedAt = now;
+        var probe = _patchService.Probe(normalized);
+        if (probe is not null) RecoverProbeState(state, probe, manifest);
         SaveState(state);
-        WriteInstallMetadata(new ManagedInstallMetadata
+        return state;
+    }
+
+    public ManagerState RecoverAllStateFromLocalInstallations(UpdateManifest? manifest = null, ManagerState? state = null)
+    {
+        state ??= LoadState();
+        foreach (var probe in _patchService.ProbeAll())
         {
-            DistributionVersion = version,
-            DiscordBranch = probe.Branch,
-            PreparedAt = state.InstalledAt ?? now,
-            VerifiedAt = now
-        });
+            if (HasPendingRecovery(probe.Branch)) continue;
+            RecoverProbeState(state, probe, manifest);
+        }
+        SaveState(state);
         return state;
     }
 
@@ -103,71 +221,119 @@ public sealed class InstallationService : IDisposable
         IProgress<OperationProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        branch = NormalizeExactBranch(branch);
         ManagerPaths.EnsureCreated();
+
         var oldState = LoadState();
-        progress?.Report(new OperationProgress("Checking the existing Discord installation…"));
-        var previousProbe = _patchService.Probe(branch);
-        var previouslyManagedBranches = _patchService.ProbeAll()
-            .Where(x => x.IsManagedPatch)
-            .Select(x => x.Branch)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        if (previousProbe is not null)
-        {
-            var previousStatus = previousProbe.IsManagedPatch
-                ? "managed Custom Vencord injection found"
+        var oldClient = CloneClientState(GetClientState(branch, oldState));
+        var installDirectory = ManagerPaths.GetInstallDirectory(branch);
+        var previousProbe = _patchService.Probe(branch)
+            ?? throw new InvalidOperationException($"{DisplayBranch(branch)} was not found on this PC.");
+
+        progress?.Report(new OperationProgress($"Checking {DisplayBranch(branch)}…"));
+        var previousStatus = previousProbe.IsBranchScopedManagedPatch
+            ? "client-specific Custom Vencord injection found"
+            : previousProbe.IsLegacyManagedPatch
+                ? "legacy shared Custom Vencord injection found"
                 : previousProbe.IsPatched
                     ? "another Vencord injection found"
-                    : "Discord found with no Vencord injection";
-            progress?.Report(new OperationProgress($"{DisplayBranch(previousProbe.Branch)}: {previousStatus}."));
-        }
+                    : "no Vencord injection found";
+        progress?.Report(new OperationProgress($"{DisplayBranch(branch)}: {previousStatus}."));
 
-        var payloadAlreadyCurrent = HasManagedFiles()
-            && !string.IsNullOrWhiteSpace(oldState.InstalledVersion)
-            && UpdateClient.CompareVersions(oldState.InstalledVersion, manifest.Version) == 0;
+        var payloadAlreadyCurrent = HasManagedFiles(branch)
+            && !string.IsNullOrWhiteSpace(oldClient.InstalledVersion)
+            && UpdateClient.CompareVersions(oldClient.InstalledVersion, manifest.Version) == 0
+            && IsClientPayloadVersionConfirmed(branch, manifest.Version);
 
-        // If another Discord channel already uses the current managed payload, adding this
-        // channel only requires an injection. Avoid redownloading/replacing the shared build.
-        if (!repair && previousProbe?.IsManagedPatch != true && payloadAlreadyCurrent)
+        // The selected client already has its own verified payload; if it merely lost or
+        // changed its injection, attach that payload without touching any other client.
+        if (!repair && previousProbe.IsBranchScopedManagedPatch != true && payloadAlreadyCurrent)
         {
-            IReadOnlyList<DiscordRestartTarget> attachRestartTargets = Array.Empty<DiscordRestartTarget>();
+            IReadOnlyList<DiscordRestartTarget> restartTargets = Array.Empty<DiscordRestartTarget>();
+            var attachRestartSafe = true;
+            DiscordInstallProbe? rollbackProbe = null;
+            PendingOperationJournal? attachJournal = null;
             try
             {
-                progress?.Report(new OperationProgress("Current managed build is already verified locally; attaching it to the selected Discord client…"));
-                attachRestartTargets = await _discordService.StopRunningAsync(progress, cancellationToken);
-                var verifiedProbe = _patchService.EnsureManagedPatch(branch, progress);
-                var now = DateTimeOffset.UtcNow;
-                oldState.LastVerifiedAt = now;
-                oldState.DiscordBranch = NormalizeBranchPreference(branch);
-                SaveState(oldState);
-                WriteInstallMetadata(new ManagedInstallMetadata
+                progress?.Report(new OperationProgress($"Attaching the existing v{oldClient.InstalledVersion} payload to {DisplayBranch(branch)}…"));
+                restartTargets = await _discordService.StopRunningAsync(branch, progress, cancellationToken);
+                rollbackProbe = _patchService.Probe(branch)
+                    ?? throw new InvalidOperationException($"{DisplayBranch(branch)} disappeared after it was closed.");
+                attachJournal = new PendingOperationJournal
                 {
-                    DistributionVersion = oldState.InstalledVersion,
-                    DiscordBranch = verifiedProbe.Branch,
-                    PreparedAt = oldState.InstalledAt ?? now,
-                    VerifiedAt = now
+                    OperationKind = PendingOperationAttach,
+                    Branch = branch,
+                    HadClientDirectory = true,
+                    PreviousWasPatched = rollbackProbe.IsPatched,
+                    PreviousPatchTarget = rollbackProbe.PatchTarget,
+                    PreviousResourcesDirectory = rollbackProbe.ResourcesDirectory,
+                    Phase = PendingPhasePatching,
+                    StartedAtUtc = DateTimeOffset.UtcNow
+                };
+                WritePendingOperation(attachJournal);
+                var verifiedProbe = _patchService.EnsureManagedPatchAtResources(branch, rollbackProbe.ResourcesDirectory, progress);
+                attachJournal.Phase = PendingPhasePatchVerified;
+                WritePendingOperation(attachJournal);
+                var now = DateTimeOffset.UtcNow;
+                var client = GetClientState(branch, oldState);
+                client.LastVerifiedAt = now;
+                client.InstalledAt ??= now;
+                WriteInstallMetadata(branch, new ManagedInstallMetadata
+                {
+                    DistributionVersion = client.InstalledVersion,
+                    DiscordBranch = branch,
+                    PreparedAt = client.InstalledAt ?? now,
+                    VerifiedAt = now,
+                    FileSha256 = ComputePayloadHashes(ManagerPaths.GetInstallDirectory(branch))
                 });
-                progress?.Report(new OperationProgress($"Installation verified · {DisplayBranch(verifiedProbe.Branch)} now uses Custom Vencord v{oldState.InstalledVersion}.", 100));
+                SaveState(oldState);
+                DeletePendingOperation(branch);
+                progress?.Report(new OperationProgress($"Installation verified · {DisplayBranch(verifiedProbe.Branch)} now uses Custom Vencord v{client.InstalledVersion}.", 100));
                 return;
+            }
+            catch (Exception operationError)
+            {
+                var patchRestored = rollbackProbe is null || TryRestorePreviousDiscordPatch(rollbackProbe, branch);
+                RestoreClientState(oldState, branch, oldClient);
+                var stateRestored = TrySaveState(oldState);
+                attachRestartSafe = patchRestored;
+                if (patchRestored && stateRestored)
+                {
+                    DeletePendingOperation(branch);
+                    throw;
+                }
+
+                throw new InvalidOperationException(
+                    $"The {DisplayBranch(branch)} install failed and its previous injection could not be fully restored. " +
+                    "Discord will be left closed to avoid launching an uncertain state.",
+                    operationError);
             }
             finally
             {
-                _discordService.Restart(attachRestartTargets);
+                if (attachRestartSafe)
+                    _discordService.Restart(restartTargets);
+                else
+                    progress?.Report(new OperationProgress($"{DisplayBranch(branch)} was left closed because rollback was not fully verified."));
             }
         }
 
-        var hadManagedDirectory = Directory.Exists(ManagerPaths.InstallDirectory);
+        var hadClientDirectory = Directory.Exists(installDirectory);
         var stagingRoot = Path.Combine(ManagerPaths.StagingDirectory, Guid.NewGuid().ToString("N"));
         var extracted = Path.Combine(stagingRoot, "package");
         var zipPath = Path.Combine(stagingRoot, manifest.Assets.WindowsRelease.Name);
         Directory.CreateDirectory(extracted);
 
-        string? backupPath = null;
-        IReadOnlyList<DiscordRestartTarget> restartTargets = Array.Empty<DiscordRestartTarget>();
+        string? backupPath = hadClientDirectory ? CreateBackupPath(branch, oldClient.InstalledVersion) : null;
+        IReadOnlyList<DiscordRestartTarget> operationRestartTargets = Array.Empty<DiscordRestartTarget>();
+        var restartSafe = true;
+        var payloadMutationStarted = false;
+        var patchMutationStarted = false;
+        DiscordInstallProbe? mutationProbe = null;
+        PendingOperationJournal? pendingOperation = null;
 
         try
         {
-            progress?.Report(new OperationProgress($"Preparing Vencord Custom Plugins v{manifest.Version}…", 0));
+            progress?.Report(new OperationProgress($"Preparing Custom Vencord v{manifest.Version} for {DisplayBranch(branch)}…", 0));
             await _updateClient.DownloadFileAsync(manifest.Assets.WindowsRelease.Url, zipPath, progress, cancellationToken);
 
             progress?.Report(new OperationProgress("Verifying SHA-256…", 100));
@@ -179,128 +345,308 @@ public sealed class InstallationService : IDisposable
             ZipFile.ExtractToDirectory(zipPath, extracted, overwriteFiles: true);
             ValidatePackage(extracted);
 
-            restartTargets = await _discordService.StopRunningAsync(progress, cancellationToken);
+            // Only the selected Discord process is stopped. Other clients remain running.
+            operationRestartTargets = await _discordService.StopRunningAsync(branch, progress, cancellationToken);
 
-            if (hadManagedDirectory)
+            // Capture the exact app-* resources directory after Discord is fully stopped. The
+            // updater may have changed app directories while the package was downloading.
+            mutationProbe = _patchService.Probe(branch)
+                ?? throw new InvalidOperationException($"{DisplayBranch(branch)} disappeared after it was closed.");
+            pendingOperation = new PendingOperationJournal
             {
-                backupPath = CreateBackupPath(oldState.InstalledVersion);
-                progress?.Report(new OperationProgress("Backing up the current installation…"));
-                Directory.Move(ManagerPaths.InstallDirectory, backupPath);
+                OperationKind = PendingOperationInstall,
+                Branch = branch,
+                BackupPath = backupPath ?? string.Empty,
+                HadClientDirectory = hadClientDirectory,
+                PreviousWasPatched = mutationProbe.IsPatched,
+                PreviousPatchTarget = mutationProbe.PatchTarget,
+                PreviousResourcesDirectory = mutationProbe.ResourcesDirectory,
+                Phase = PendingPhasePrepared,
+                StartedAtUtc = DateTimeOffset.UtcNow
+            };
+
+            WritePendingOperation(pendingOperation);
+
+            if (hadClientDirectory)
+            {
+                progress?.Report(new OperationProgress($"Backing up {DisplayBranch(branch)}'s current managed payload…"));
+                Directory.Move(installDirectory, backupPath!);
+                payloadMutationStarted = true;
             }
 
-            progress?.Report(new OperationProgress("Installing the new build…"));
-            Directory.Move(extracted, ManagerPaths.InstallDirectory);
-            CopyExamplePluginIfMissing();
-            WriteInstallMetadata(new ManagedInstallMetadata
+            progress?.Report(new OperationProgress($"Installing the new payload for {DisplayBranch(branch)}…"));
+            Directory.Move(extracted, installDirectory);
+            payloadMutationStarted = true;
+            var preparedAt = DateTimeOffset.UtcNow;
+            var payloadHashes = ComputePayloadHashes(installDirectory);
+            WriteInstallMetadata(branch, new ManagedInstallMetadata
             {
                 DistributionVersion = manifest.Version,
                 DiscordBranch = branch,
-                PreparedAt = DateTimeOffset.UtcNow
+                PreparedAt = preparedAt,
+                FileSha256 = payloadHashes
             });
+            pendingOperation.Phase = PendingPhasePayloadInstalled;
+            WritePendingOperation(pendingOperation);
 
             cancellationToken.ThrowIfCancellationRequested();
-            var verifiedProbe = _patchService.EnsureManagedPatch(branch, progress);
-
-            var branchesToVerify = previouslyManagedBranches
-                .Append(verifiedProbe.Branch)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-            if (branchesToVerify.Length > 1)
-                progress?.Report(new OperationProgress("Verifying every Discord client that uses the shared managed build…"));
-            foreach (var managedBranch in branchesToVerify)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                _patchService.VerifyManagedPatch(managedBranch, progress);
-            }
+            pendingOperation.Phase = PendingPhasePatching;
+            WritePendingOperation(pendingOperation);
+            patchMutationStarted = true;
+            var verified = _patchService.EnsureManagedPatchAtResources(branch, mutationProbe.ResourcesDirectory, progress);
+            _patchService.VerifyManagedPatchAtResources(branch, mutationProbe.ResourcesDirectory, progress);
+            pendingOperation.Phase = PendingPhasePatchVerified;
+            WritePendingOperation(pendingOperation);
 
             var now = DateTimeOffset.UtcNow;
-            var newState = new ManagerState
-            {
-                InstalledVersion = manifest.Version,
-                InstalledAt = oldState.InstalledAt ?? now,
-                LastUpdatedAt = now,
-                LastVerifiedAt = now,
-                DiscordBranch = NormalizeBranchPreference(branch),
-                LastBackupPath = backupPath ?? oldState.LastBackupPath
-            };
-            SaveState(newState);
-            WriteInstallMetadata(new ManagedInstallMetadata
+            var clientState = GetClientState(branch, oldState);
+            clientState.InstalledVersion = manifest.Version;
+            clientState.InstalledAt ??= oldClient.InstalledAt ?? now;
+            clientState.LastUpdatedAt = now;
+            clientState.LastVerifiedAt = now;
+            clientState.LastBackupPath = backupPath ?? oldClient.LastBackupPath;
+            SaveState(oldState);
+            WriteInstallMetadata(branch, new ManagedInstallMetadata
             {
                 DistributionVersion = manifest.Version,
-                DiscordBranch = verifiedProbe.Branch,
-                PreparedAt = newState.InstalledAt ?? now,
-                VerifiedAt = now
+                DiscordBranch = verified.Branch,
+                PreparedAt = clientState.InstalledAt ?? now,
+                VerifiedAt = now,
+                FileSha256 = payloadHashes
             });
-            PruneBackups(3);
+            PruneBackups(branch, 3);
+            DeletePendingOperation(branch);
 
             var completion = repair
-                ? "Repair verified · complete."
-                : previousProbe?.IsManagedPatch == true || hadManagedDirectory
-                    ? "Update verified · complete."
-                    : "Installation verified · complete.";
+                ? $"Repair verified · {DisplayBranch(branch)} only."
+                : previousProbe.IsManagedPatch || hadClientDirectory
+                    ? $"Update verified · {DisplayBranch(branch)} only."
+                    : $"Installation verified · {DisplayBranch(branch)} only.";
             progress?.Report(new OperationProgress(completion, 100));
         }
-        catch
+        catch (Exception operationError)
         {
-            progress?.Report(new OperationProgress("Update failed. Rolling back…"));
-            TryRollback(backupPath, hadManagedDirectory);
-            TryRestorePreviousDiscordPatch(previousProbe, branch);
-            throw;
+            progress?.Report(new OperationProgress($"Operation failed. Rolling back {DisplayBranch(branch)} only…"));
+            var filesRestored = !payloadMutationStarted || TryRollback(installDirectory, backupPath, hadClientDirectory);
+            var patchRestored = !patchMutationStarted || (mutationProbe is not null && TryRestorePreviousDiscordPatch(mutationProbe, branch));
+            RestoreClientState(oldState, branch, oldClient);
+            var stateRestored = TrySaveState(oldState);
+            restartSafe = filesRestored && patchRestored;
+
+            if (filesRestored && patchRestored && stateRestored)
+            {
+                DeletePendingOperation(branch);
+                throw;
+            }
+
+            var recoveryPath = backupPath ?? "(no backup was created)";
+            throw new InvalidOperationException(
+                $"The {DisplayBranch(branch)} operation failed and automatic rollback could not be fully verified. " +
+                $"Discord will be left closed to avoid launching a potentially broken client. Backup: {recoveryPath}",
+                operationError);
         }
         finally
         {
-            SafeDeleteDirectory(stagingRoot);
-            _discordService.Restart(restartTargets);
+            try { SafeDeleteDirectory(stagingRoot); }
+            catch { progress?.Report(new OperationProgress("Temporary staging cleanup could not be completed; it will be retried later.")); }
+            if (restartSafe)
+            {
+                _discordService.Restart(operationRestartTargets);
+            }
+            else
+            {
+                progress?.Report(new OperationProgress($"{DisplayBranch(branch)} was left closed because rollback was not fully verified."));
+            }
         }
     }
 
-    public async Task RepairAsync(
+    public Task RepairAsync(
         UpdateManifest manifest,
         string branch,
         IProgress<OperationProgress>? progress = null,
         CancellationToken cancellationToken = default) =>
-        await InstallOrUpdateAsync(manifest, branch, repair: true, progress, cancellationToken);
+        InstallOrUpdateAsync(manifest, branch, repair: true, progress, cancellationToken);
 
     public async Task UninstallAsync(
         string branch,
         IProgress<OperationProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        var state = LoadState();
+        branch = NormalizeExactBranch(branch);
         var probe = _patchService.Probe(branch);
-        var hasManagedPatch = probe?.IsManagedPatch == true;
-        if (!hasManagedPatch) return;
+        if (probe?.IsManagedPatch != true) return;
 
         IReadOnlyList<DiscordRestartTarget> restartTargets = Array.Empty<DiscordRestartTarget>();
+        var restartSafe = true;
+        var journalWritten = false;
         try
         {
-            restartTargets = await _discordService.StopRunningAsync(progress, cancellationToken);
-            if (hasManagedPatch)
-                _patchService.UnpatchManaged(probe!.Branch, progress);
+            restartTargets = await _discordService.StopRunningAsync(branch, progress, cancellationToken);
+            WritePendingOperation(new PendingOperationJournal
+            {
+                OperationKind = PendingOperationUninstall,
+                Branch = branch,
+                Phase = PendingPhaseUninstalling,
+                StartedAtUtc = DateTimeOffset.UtcNow
+            });
+            journalWritten = true;
 
-            var remainingManagedClients = _patchService.ProbeAll().Where(x => x.IsManagedPatch).ToArray();
-            if (remainingManagedClients.Length == 0)
-            {
-                progress?.Report(new OperationProgress("No other Discord clients use this build; removing managed Vencord files…"));
-                SafeDeleteDirectory(ManagerPaths.InstallDirectory);
-                state.InstalledVersion = string.Empty;
-                TryDeleteFile(ManagerPaths.InstallMetadataFile);
-            }
-            else
-            {
-                var remaining = string.Join(", ", remainingManagedClients.Select(x => DisplayBranch(x.Branch)));
-                progress?.Report(new OperationProgress($"Keeping the shared managed build because it is still used by {remaining}."));
-            }
-            state.LastUpdatedAt = DateTimeOffset.UtcNow;
-            state.LastVerifiedAt = DateTimeOffset.UtcNow;
-            state.DiscordBranch = NormalizeBranchPreference(branch);
-            SaveState(state);
-            progress?.Report(new OperationProgress($"Uninstall verified · {DisplayBranch(probe!.Branch)} is clean.", 100));
+            FinishUninstallAfterStop(branch, progress);
+            DeletePendingOperation(branch);
+            progress?.Report(new OperationProgress($"Uninstall verified · {DisplayBranch(branch)} only is clean.", 100));
+        }
+        catch (Exception operationError)
+        {
+            if (journalWritten) restartSafe = false;
+            throw new InvalidOperationException(
+                journalWritten
+                    ? $"The {DisplayBranch(branch)} uninstall was interrupted and will be recovered on the next manager launch. The client will remain closed until recovery is verified."
+                    : $"The {DisplayBranch(branch)} uninstall could not start safely.",
+                operationError);
         }
         finally
         {
-            _discordService.Restart(restartTargets);
+            if (restartSafe)
+                _discordService.Restart(restartTargets);
+            else
+                progress?.Report(new OperationProgress($"{DisplayBranch(branch)} was left closed because uninstall recovery is still pending."));
         }
+    }
+
+    private void FinishUninstallAfterStop(string branch, IProgress<OperationProgress>? progress = null)
+    {
+        branch = NormalizeExactBranch(branch);
+        _patchService.UnpatchAllManagedForBranch(branch, progress);
+
+        var clientDirectory = ManagerPaths.GetInstallDirectory(branch);
+        if (Directory.Exists(clientDirectory))
+        {
+            progress?.Report(new OperationProgress($"Removing {DisplayBranch(branch)}'s managed payload…"));
+            SafeDeleteDirectory(clientDirectory);
+        }
+
+        TryRemoveLegacyPayloadIfUnused(branch, progress);
+
+        var state = LoadState();
+        state.Clients[branch] = new ClientInstallState
+        {
+            LastUpdatedAt = DateTimeOffset.UtcNow,
+            LastVerifiedAt = DateTimeOffset.UtcNow
+        };
+        SaveState(state);
+
+        if (_patchService.Probe(branch)?.IsManagedPatch == true)
+            throw new InvalidDataException($"Uninstall verification failed: {DisplayBranch(branch)} still has a manager-owned injection.");
+    }
+
+    private void TryRemoveLegacyPayloadIfUnused(string currentBranch, IProgress<OperationProgress>? progress = null)
+    {
+        currentBranch = NormalizeExactBranch(currentBranch);
+        if (!Directory.Exists(ManagerPaths.LegacyInstallDirectory)) return;
+
+        // Another client's pending operation may need the legacy patcher as its exact rollback
+        // target even when its app.asar is temporarily between rename steps and cannot be probed.
+        // Never delete that rollback dependency until the other journal is resolved.
+        if (GetPendingRecoveryBranches().Any(branch => !branch.Equals(currentBranch, StringComparison.OrdinalIgnoreCase)))
+        {
+            progress?.Report(new OperationProgress("Keeping the legacy shared payload because another Discord client still has pending recovery."));
+            return;
+        }
+
+        var legacyPatcher = Path.Combine(ManagerPaths.LegacyInstallDirectory, "dist", "patcher.js");
+        if (_patchService.AnyDiscordPatchReferences(legacyPatcher)) return;
+
+        progress?.Report(new OperationProgress("No clients still use the legacy shared payload; removing it…"));
+        SafeDeleteDirectory(ManagerPaths.LegacyInstallDirectory);
+    }
+
+    private void RecoverProbeState(ManagerState state, DiscordInstallProbe probe, UpdateManifest? manifest)
+    {
+        if (!probe.IsManagedPatch || !HasUsableManagedPayload(probe)) return;
+
+        var client = GetClientState(probe.Branch, state);
+        var payloadDirectory = probe.IsBranchScopedManagedPatch
+            ? ManagerPaths.GetInstallDirectory(probe.Branch)
+            : ManagerPaths.LegacyInstallDirectory;
+        var metadata = probe.IsBranchScopedManagedPatch
+            ? LoadInstallMetadata(ManagerPaths.GetInstallMetadataFile(probe.Branch))
+            : LoadInstallMetadata(ManagerPaths.LegacyInstallMetadataFile);
+
+        // Metadata is written alongside the payload before injection. Prefer it over stale
+        // manager-state data so interrupted updates recover the version that is actually on disk.
+        var version = metadata?.DistributionVersion ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(version)) version = client.InstalledVersion;
+        if (string.IsNullOrWhiteSpace(version) && probe.IsLegacyManagedPatch) version = state.InstalledVersion;
+        if (string.IsNullOrWhiteSpace(version) && manifest is not null && LocalPackageMatchesManifest(manifest, payloadDirectory))
+            version = manifest.Version;
+        if (string.IsNullOrWhiteSpace(version)) return;
+
+        var now = DateTimeOffset.UtcNow;
+        client.InstalledVersion = version;
+        client.InstalledAt ??= metadata?.PreparedAt ?? state.InstalledAt ?? now;
+        client.LastVerifiedAt = now;
+
+        if (probe.IsBranchScopedManagedPatch)
+        {
+            if (!VerifyPayloadHashes(payloadDirectory, metadata?.FileSha256)) return;
+            WriteInstallMetadata(probe.Branch, new ManagedInstallMetadata
+            {
+                DistributionVersion = version,
+                DiscordBranch = probe.Branch,
+                PreparedAt = client.InstalledAt ?? now,
+                VerifiedAt = now,
+                FileSha256 = new Dictionary<string, string>(metadata!.FileSha256, StringComparer.OrdinalIgnoreCase)
+            });
+        }
+    }
+
+    private void MigrateLegacyState(ManagerState state)
+    {
+        if (string.IsNullOrWhiteSpace(state.InstalledVersion)) return;
+        foreach (var probe in _patchService.ProbeAll().Where(x => x.IsManagedPatch))
+        {
+            var branch = probe.Branch;
+            if (state.Clients.TryGetValue(branch, out var existing) && !string.IsNullOrWhiteSpace(existing.InstalledVersion))
+                continue;
+
+            state.Clients[branch] = new ClientInstallState
+            {
+                InstalledVersion = state.InstalledVersion,
+                InstalledAt = state.InstalledAt,
+                LastUpdatedAt = state.LastUpdatedAt,
+                LastVerifiedAt = state.LastVerifiedAt,
+                LastBackupPath = state.LastBackupPath
+            };
+        }
+    }
+
+    private static ClientInstallState CloneClientState(ClientInstallState source) => new()
+    {
+        InstalledVersion = source.InstalledVersion,
+        InstalledAt = source.InstalledAt,
+        LastUpdatedAt = source.LastUpdatedAt,
+        LastVerifiedAt = source.LastVerifiedAt,
+        LastBackupPath = source.LastBackupPath
+    };
+
+    private static void RestoreClientState(ManagerState state, string branch, ClientInstallState oldClient) =>
+        state.Clients[NormalizeExactBranch(branch)] = CloneClientState(oldClient);
+
+    private static bool HasPayloadFiles(string directory)
+    {
+        if (!Directory.Exists(directory)) return false;
+        foreach (var relative in new[]
+                 {
+                     Path.Combine("dist", "renderer.js"),
+                     Path.Combine("dist", "patcher.js"),
+                     Path.Combine("dist", "vencordDesktopRenderer.js"),
+                     "README.md"
+                 })
+        {
+            var path = Path.Combine(directory, relative);
+            if (!File.Exists(path) || new FileInfo(path).Length == 0) return false;
+        }
+        return true;
     }
 
     private static void ValidatePackage(string directory)
@@ -314,71 +660,115 @@ public sealed class InstallationService : IDisposable
             Path.Combine(directory, "README.md")
         ];
 
-        var missing = required.Where(path => !File.Exists(path)).ToArray();
+        var missing = required.Where(path => !File.Exists(path) || new FileInfo(path).Length == 0).ToArray();
         if (missing.Length > 0)
             throw new InvalidDataException("The release archive is missing expected files: " + string.Join(", ", missing.Select(Path.GetFileName)));
     }
 
-    private static void CopyExamplePluginIfMissing()
-    {
-        var examples = Path.Combine(ManagerPaths.InstallDirectory, "example-plugins");
-        if (!Directory.Exists(examples)) return;
-        Directory.CreateDirectory(ManagerPaths.PluginsDirectory);
-
-        foreach (var source in Directory.EnumerateFiles(examples, "*.js", SearchOption.TopDirectoryOnly))
-        {
-            var destination = Path.Combine(ManagerPaths.PluginsDirectory, Path.GetFileName(source));
-            if (!File.Exists(destination)) File.Copy(source, destination);
-        }
-    }
-
-    private void TryRestorePreviousDiscordPatch(DiscordInstallProbe? previousProbe, string requestedBranch)
+    private bool TryRestorePreviousDiscordPatch(DiscordInstallProbe? previousProbe, string branch)
     {
         try
         {
-            var branch = previousProbe?.Branch ?? requestedBranch;
-            var current = _patchService.Probe(branch);
-            if (previousProbe?.IsPatched == true)
-            {
-                if (!string.IsNullOrWhiteSpace(previousProbe.PatchTarget)
-                    && (!current?.IsPatched ?? true || !PathsEqual(current.PatchTarget, previousProbe.PatchTarget)))
-                    _patchService.RestorePatchTarget(branch, previousProbe.PatchTarget);
-            }
-            else if (current?.IsManagedPatch == true)
-            {
-                _patchService.EnsureUnpatched(branch);
-            }
+            branch = NormalizeExactBranch(branch);
+            if (previousProbe is null) return true;
+            _patchService.RecoverResourcesToSnapshot(
+                branch,
+                previousProbe.ResourcesDirectory,
+                previousProbe.IsPatched,
+                previousProbe.PatchTarget);
+            var verified = _patchService.ProbeLocalResourcesForRollback(branch, previousProbe.ResourcesDirectory);
+            if (previousProbe.IsPatched)
+                return verified?.IsPatched == true && PathsEqual(verified.PatchTarget, previousProbe.PatchTarget);
+            return verified is not null && !verified.IsPatched;
         }
         catch
         {
-            // Preserve the original installation exception. The managed-file backup remains available.
+            return false;
         }
     }
 
-    private static ManagedInstallMetadata? LoadInstallMetadata()
+    private static ManagedInstallMetadata? LoadInstallMetadata(string metadataPath)
     {
-        try
-        {
-            if (!File.Exists(ManagerPaths.InstallMetadataFile)) return null;
-            return JsonSerializer.Deserialize<ManagedInstallMetadata>(File.ReadAllText(ManagerPaths.InstallMetadataFile), JsonOptions);
-        }
-        catch
-        {
+        if (!TryReadJson(metadataPath, out ManagedInstallMetadata metadata)
+            && !TryReadJson(metadataPath + ".bak", out metadata))
             return null;
+        metadata.DistributionVersion = NormalizeStoredVersion(metadata.DistributionVersion);
+        return metadata;
+    }
+
+    private static bool IsClientPayloadVersionConfirmed(string branch, string version)
+    {
+        var metadata = LoadInstallMetadata(ManagerPaths.GetInstallMetadataFile(branch));
+        if (metadata is null || string.IsNullOrWhiteSpace(metadata.DistributionVersion)) return false;
+        var expected = NormalizeStoredVersion(version);
+        return !string.IsNullOrWhiteSpace(expected)
+            && metadata.DistributionVersion.Equals(expected, StringComparison.OrdinalIgnoreCase)
+            && VerifyPayloadHashes(ManagerPaths.GetInstallDirectory(branch), metadata.FileSha256);
+    }
+
+    private static readonly string[] IntegrityFiles =
+    [
+        Path.Combine("dist", "package.json"),
+        Path.Combine("dist", "patcher.js"),
+        Path.Combine("dist", "preload.js"),
+        Path.Combine("dist", "renderer.js"),
+        Path.Combine("dist", "renderer.css"),
+        Path.Combine("dist", "vencordDesktopMain.js"),
+        Path.Combine("dist", "vencordDesktopPreload.js"),
+        Path.Combine("dist", "vencordDesktopRenderer.js"),
+        Path.Combine("dist", "vencordDesktopRenderer.css"),
+        "README.md"
+    ];
+
+    private static Dictionary<string, string> ComputePayloadHashes(string directory)
+    {
+        var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var relative in IntegrityFiles)
+        {
+            var path = Path.Combine(directory, relative);
+            if (!File.Exists(path) || new FileInfo(path).Length == 0)
+                throw new InvalidDataException($"Managed payload integrity file is missing or empty: {relative}");
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            hashes[relative.Replace(Path.DirectorySeparatorChar, '/')] = Convert.ToHexString(SHA256.HashData(stream));
+        }
+        return hashes;
+    }
+
+    private static bool VerifyPayloadHashes(string directory, IReadOnlyDictionary<string, string>? expected)
+    {
+        if (expected is null || expected.Count == 0) return false;
+        try
+        {
+            foreach (var relative in IntegrityFiles)
+            {
+                var key = relative.Replace(Path.DirectorySeparatorChar, '/');
+                if (!expected.TryGetValue(key, out var expectedHash) || expectedHash.Length != 64) return false;
+                var path = Path.Combine(directory, relative);
+                if (!File.Exists(path) || new FileInfo(path).Length == 0) return false;
+                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                var actual = Convert.ToHexString(SHA256.HashData(stream));
+                if (!actual.Equals(expectedHash, StringComparison.OrdinalIgnoreCase)) return false;
+            }
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 
-    private static void WriteInstallMetadata(ManagedInstallMetadata metadata)
+    private static void WriteInstallMetadata(string branch, ManagedInstallMetadata metadata)
     {
-        Directory.CreateDirectory(ManagerPaths.InstallDirectory);
-        File.WriteAllText(ManagerPaths.InstallMetadataFile, JsonSerializer.Serialize(metadata, JsonOptions));
+        var installDirectory = ManagerPaths.GetInstallDirectory(branch);
+        Directory.CreateDirectory(installDirectory);
+        AtomicWriteText(ManagerPaths.GetInstallMetadataFile(branch), JsonSerializer.Serialize(metadata, JsonOptions));
     }
 
-    private static bool LocalPackageMatchesManifest(UpdateManifest manifest)
+    private static bool LocalPackageMatchesManifest(UpdateManifest manifest, string directory)
     {
         try
         {
-            var readmePath = Path.Combine(ManagerPaths.InstallDirectory, "README.md");
+            var readmePath = Path.Combine(directory, "README.md");
             if (!File.Exists(readmePath)) return false;
             var readme = File.ReadAllText(readmePath);
             var orion = manifest.Components.OrionQuests.Trim().TrimStart('v', 'V');
@@ -409,12 +799,28 @@ public sealed class InstallationService : IDisposable
         }
     }
 
-    private static string DisplayBranch(string branch) => branch.ToLowerInvariant() switch
+    private static string DisplayBranch(string branch) => NormalizeExactBranch(branch) switch
     {
         "stable" => "Discord Stable",
         "ptb" => "Discord PTB",
         "canary" => "Discord Canary",
         _ => "Discord"
+    };
+
+    private static string NormalizeExactBranch(string branch) => branch.ToLowerInvariant() switch
+    {
+        "stable" => "stable",
+        "ptb" => "ptb",
+        "canary" => "canary",
+        _ => throw new ArgumentOutOfRangeException(nameof(branch), "A specific Discord client is required for this operation.")
+    };
+
+    private static string NormalizeStateBranch(string branch) => branch.ToLowerInvariant() switch
+    {
+        "stable" => "stable",
+        "ptb" => "ptb",
+        "canary" => "canary",
+        _ => branch.ToLowerInvariant()
     };
 
     private static string NormalizeBranchPreference(string branch) => branch.ToLowerInvariant() switch
@@ -425,33 +831,39 @@ public sealed class InstallationService : IDisposable
         _ => "auto"
     };
 
-    private static string CreateBackupPath(string version)
+    private static string CreateBackupPath(string branch, string version)
     {
+        branch = NormalizeExactBranch(branch);
+        var backupRoot = ManagerPaths.GetBackupsDirectory(branch);
+        Directory.CreateDirectory(backupRoot);
         var safeVersion = string.IsNullOrWhiteSpace(version) ? "unknown" : version.Replace(Path.DirectorySeparatorChar, '-');
-        var path = Path.Combine(ManagerPaths.BackupsDirectory, $"v{safeVersion}-{DateTime.UtcNow:yyyyMMdd-HHmmss}");
+        var path = Path.Combine(backupRoot, $"v{safeVersion}-{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}-{Guid.NewGuid():N}");
         ManagerPaths.EnsureManagedPath(path);
         return path;
     }
 
-    private static void TryRollback(string? backupPath, bool hadInstall)
+    private static bool TryRollback(string installDirectory, string? backupPath, bool hadInstall)
     {
         try
         {
-            if (Directory.Exists(ManagerPaths.InstallDirectory)) SafeDeleteDirectory(ManagerPaths.InstallDirectory);
+            if (Directory.Exists(installDirectory)) SafeDeleteDirectory(installDirectory);
             if (hadInstall && !string.IsNullOrWhiteSpace(backupPath) && Directory.Exists(backupPath))
-                Directory.Move(backupPath, ManagerPaths.InstallDirectory);
+                Directory.Move(backupPath, installDirectory);
+            return hadInstall ? Directory.Exists(installDirectory) : !Directory.Exists(installDirectory);
         }
         catch
         {
-            // Preserve the original exception. The backup remains under the backups directory.
+            return false;
         }
     }
 
-    private static void PruneBackups(int keep)
+    private static void PruneBackups(string branch, int keep)
     {
         try
         {
-            var directories = new DirectoryInfo(ManagerPaths.BackupsDirectory)
+            var backupRoot = ManagerPaths.GetBackupsDirectory(branch);
+            if (!Directory.Exists(backupRoot)) return;
+            var directories = new DirectoryInfo(backupRoot)
                 .EnumerateDirectories()
                 .OrderByDescending(x => x.CreationTimeUtc)
                 .Skip(keep)
@@ -468,20 +880,258 @@ public sealed class InstallationService : IDisposable
         Directory.Delete(path, recursive: true);
     }
 
-    private static void TryDeleteFile(string path)
+    private static void SaveState(ManagerState state)
+    {
+        ManagerPaths.EnsureCreated();
+        var json = JsonSerializer.Serialize(state, JsonOptions);
+        AtomicWriteText(ManagerPaths.StateFile, json);
+    }
+
+    private static bool TrySaveState(ManagerState state)
     {
         try
         {
+            SaveState(state);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool RecoverPendingJournal(
+        string branch,
+        PendingOperationJournal journal,
+        IProgress<OperationProgress>? progress = null)
+    {
+        branch = NormalizeExactBranch(branch);
+        if (!string.Equals(NormalizeExactBranch(journal.Branch), branch, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The pending-operation journal does not match the Discord client being recovered.");
+
+        ValidatePendingJournalPaths(branch, journal);
+
+        var operationKind = string.IsNullOrWhiteSpace(journal.OperationKind)
+            ? PendingOperationInstall
+            : journal.OperationKind;
+        if (!operationKind.Equals(PendingOperationInstall, StringComparison.OrdinalIgnoreCase)
+            && !operationKind.Equals(PendingOperationAttach, StringComparison.OrdinalIgnoreCase)
+            && !operationKind.Equals(PendingOperationUninstall, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("The pending-operation journal contains an unknown operation type.");
+        if (operationKind.Equals(PendingOperationUninstall, StringComparison.OrdinalIgnoreCase))
+        {
+            progress?.Report(new OperationProgress($"Resuming interrupted uninstall for {DisplayBranch(branch)}…"));
+            FinishUninstallAfterStop(branch, progress);
+            return true;
+        }
+
+        var installDirectory = ManagerPaths.GetInstallDirectory(branch);
+        try
+        {
+            var phase = journal.Phase ?? PendingPhasePrepared;
+            if (phase.Equals(PendingPhasePatchVerified, StringComparison.OrdinalIgnoreCase)
+                && VerifyManagedPayloadIntegrity(branch)
+                && !string.IsNullOrWhiteSpace(journal.PreviousResourcesDirectory))
+            {
+                try
+                {
+                    _patchService.VerifyManagedPatchAtResources(branch, journal.PreviousResourcesDirectory, progress);
+                    return true;
+                }
+                catch
+                {
+                    // Fall through to conservative rollback below.
+                }
+            }
+
+            if (phase.Equals(PendingPhasePayloadInstalled, StringComparison.OrdinalIgnoreCase)
+                && VerifyManagedPayloadIntegrity(branch))
+            {
+                // The package had been fully moved and its metadata written, but no Discord
+                // injection mutation had begun. Keeping the isolated payload is safe.
+                return true;
+            }
+
+            progress?.Report(new OperationProgress($"Rolling back interrupted {DisplayBranch(branch)} changes…"));
+            var filesRestored = RecoverJournalPayload(branch, installDirectory, journal);
+            var patchRestored = phase.Equals(PendingPhasePatching, StringComparison.OrdinalIgnoreCase)
+                || phase.Equals(PendingPhasePatchVerified, StringComparison.OrdinalIgnoreCase)
+                ? RecoverJournalPatch(branch, journal)
+                : true;
+            return filesRestored && patchRestored;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool RecoverJournalPayload(string branch, string installDirectory, PendingOperationJournal journal)
+    {
+        try
+        {
+            if (!journal.HadClientDirectory)
+            {
+                if (Directory.Exists(installDirectory)) SafeDeleteDirectory(installDirectory);
+                return !Directory.Exists(installDirectory);
+            }
+
+            if (string.IsNullOrWhiteSpace(journal.BackupPath) || !Directory.Exists(journal.BackupPath))
+                return Directory.Exists(installDirectory);
+
+            ManagerPaths.EnsureManagedPath(journal.BackupPath);
+            if (Directory.Exists(installDirectory)) SafeDeleteDirectory(installDirectory);
+            Directory.Move(journal.BackupPath, installDirectory);
+            return Directory.Exists(installDirectory);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool RecoverJournalPatch(string branch, PendingOperationJournal journal)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(journal.PreviousResourcesDirectory)) return false;
+            _patchService.RecoverResourcesToSnapshot(
+                branch,
+                journal.PreviousResourcesDirectory,
+                journal.PreviousWasPatched,
+                journal.PreviousPatchTarget);
+            var restored = _patchService.ProbeLocalResourcesForRollback(branch, journal.PreviousResourcesDirectory);
+            if (restored is null) return false;
+            return journal.PreviousWasPatched
+                ? restored.IsPatched && PathsEqual(restored.PatchTarget, journal.PreviousPatchTarget)
+                : !restored.IsPatched;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void WritePendingOperation(PendingOperationJournal journal)
+    {
+        journal.Branch = NormalizeExactBranch(journal.Branch);
+        ValidatePendingJournalPaths(journal.Branch, journal);
+        AtomicWriteText(
+            ManagerPaths.GetPendingOperationFile(journal.Branch),
+            JsonSerializer.Serialize(journal, JsonOptions));
+    }
+
+    private static void DeletePendingOperation(string branch)
+    {
+        var path = ManagerPaths.GetPendingOperationFile(branch);
+        try
+        {
+            // Remove the older backup first. If cleanup is interrupted, the newest primary
+            // journal remains authoritative and recovery cannot replay a stale earlier phase.
+            if (File.Exists(path + ".bak")) File.Delete(path + ".bak");
             if (File.Exists(path)) File.Delete(path);
         }
         catch { }
     }
 
-    private static void SaveState(ManagerState state)
+    private static void ValidatePendingJournalPaths(string branch, PendingOperationJournal journal)
     {
-        ManagerPaths.EnsureCreated();
-        var json = JsonSerializer.Serialize(state, JsonOptions);
-        File.WriteAllText(ManagerPaths.StateFile, json);
+        branch = NormalizeExactBranch(branch);
+        if (!string.IsNullOrWhiteSpace(journal.BackupPath))
+        {
+            ManagerPaths.EnsureManagedPath(journal.BackupPath);
+            var backupRoot = Path.GetFullPath(ManagerPaths.GetBackupsDirectory(branch)).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            var candidate = Path.GetFullPath(journal.BackupPath);
+            if (!candidate.StartsWith(backupRoot, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("The pending-operation backup path is outside the selected Discord client's backup directory.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(journal.PreviousResourcesDirectory))
+        {
+            // This validates branch ownership without requiring app.asar to still exist; a crash
+            // may have interrupted one of the rename steps.
+            var variantFolder = branch switch
+            {
+                "stable" => "Discord",
+                "ptb" => "DiscordPTB",
+                "canary" => "DiscordCanary",
+                _ => throw new ArgumentOutOfRangeException(nameof(branch))
+            };
+            var clientRoot = Path.GetFullPath(Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                variantFolder)).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            var resources = Path.GetFullPath(journal.PreviousResourcesDirectory);
+            if (!resources.StartsWith(clientRoot, StringComparison.OrdinalIgnoreCase)
+                || !Path.GetFileName(resources).Equals("resources", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("The pending-operation resources path does not belong to the selected Discord client.");
+        }
+    }
+
+    private static bool TryReadJson<T>(string path, out T value) where T : class, new()
+    {
+        value = new T();
+        try
+        {
+            if (!File.Exists(path)) return false;
+            var parsed = JsonSerializer.Deserialize<T>(File.ReadAllText(path), JsonOptions);
+            if (parsed is null) return false;
+            value = parsed;
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string NormalizeStoredVersion(string value)
+    {
+        value = value?.Trim().TrimStart('v', 'V') ?? string.Empty;
+        return Version.TryParse(value, out var parsed) ? parsed.ToString() : string.Empty;
+    }
+
+    private static void AtomicWriteText(string path, string content)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var temporary = path + ".tmp-" + Guid.NewGuid().ToString("N");
+        var backup = path + ".bak";
+        try
+        {
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+            using (var writer = new StreamWriter(stream))
+            {
+                writer.Write(content);
+                writer.Flush();
+                stream.Flush(flushToDisk: true);
+            }
+
+            if (File.Exists(path))
+            {
+                try
+                {
+                    File.Replace(temporary, path, backup, ignoreMetadataErrors: true);
+                }
+                catch (PlatformNotSupportedException)
+                {
+                    File.Copy(path, backup, overwrite: true);
+                    File.Move(temporary, path, overwrite: true);
+                }
+                catch (IOException)
+                {
+                    File.Copy(path, backup, overwrite: true);
+                    File.Move(temporary, path, overwrite: true);
+                }
+            }
+            else
+            {
+                File.Move(temporary, path);
+            }
+        }
+        finally
+        {
+            try { if (File.Exists(temporary)) File.Delete(temporary); }
+            catch { }
+        }
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -489,6 +1139,28 @@ public sealed class InstallationService : IDisposable
         WriteIndented = true,
         PropertyNameCaseInsensitive = true
     };
+
+    private sealed class PendingOperationJournal
+    {
+        public string OperationKind { get; set; } = PendingOperationInstall;
+        public string Branch { get; set; } = string.Empty;
+        public string BackupPath { get; set; } = string.Empty;
+        public bool HadClientDirectory { get; set; }
+        public bool PreviousWasPatched { get; set; }
+        public string PreviousPatchTarget { get; set; } = string.Empty;
+        public string PreviousResourcesDirectory { get; set; } = string.Empty;
+        public string Phase { get; set; } = PendingPhasePrepared;
+        public DateTimeOffset StartedAtUtc { get; set; }
+    }
+
+    private const string PendingPhasePrepared = "prepared";
+    private const string PendingPhasePayloadInstalled = "payload-installed";
+    private const string PendingPhasePatching = "patching";
+    private const string PendingPhasePatchVerified = "patch-verified";
+    private const string PendingPhaseUninstalling = "uninstalling";
+    private const string PendingOperationInstall = "install-update-repair";
+    private const string PendingOperationAttach = "attach";
+    private const string PendingOperationUninstall = "uninstall";
 
     public void Dispose() => _updateClient.Dispose();
 }

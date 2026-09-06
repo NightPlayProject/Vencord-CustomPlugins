@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
@@ -15,6 +16,7 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, DiscordInstallProbe> _clientProbes = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<ScrollViewer, SmoothScrollState> _smoothScrollStates = new();
     private bool _busy;
+    private bool _allowCloseWhileBusy;
     private bool _smoothScrollRenderingSubscribed;
     private string _lastProgressMessage = string.Empty;
     private TaskCompletionSource<bool>? _dialogCompletion;
@@ -43,7 +45,8 @@ public partial class MainWindow : Window
         InitializeComponent();
         _state = _installationService.LoadState();
         ApplySavedBranch();
-        _state = _installationService.RecoverStateFromLocalInstallation(SelectedBranch());
+        if (_installationService.GetPendingRecoveryBranches().Count == 0)
+            _state = _installationService.RecoverAllStateFromLocalInstallations();
         RefreshClientProbes();
         _localProbe = ResolveSelectedProbe();
         RefreshUi();
@@ -52,8 +55,34 @@ public partial class MainWindow : Window
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
         AppendLog($"Custom Vencord Manager v{AppInfo.CurrentVersion} started.");
-        AppendLog($"Managed install: {ManagerPaths.InstallDirectory}");
+        AppendLog($"Managed root: {ManagerPaths.Root}");
+        await RecoverInterruptedOperationsAsync();
         await CheckForUpdatesAsync(showSuccessDialog: false);
+    }
+
+    private async Task<bool> RecoverInterruptedOperationsAsync()
+    {
+        var pending = _installationService.GetPendingRecoveryBranches().ToArray();
+        if (pending.Length == 0) return true;
+
+        AppendLog($"Detected {pending.Length} interrupted operation{(pending.Length == 1 ? string.Empty : "s")}. Recovery will run one Discord client at a time.");
+        foreach (var branch in pending)
+        {
+            await RunOperationAsync(
+                $"Recovering interrupted {DisplayBranch(branch)} operation…",
+                progress => _installationService.RecoverInterruptedOperationAsync(branch, progress),
+                showCompletionDialog: false);
+        }
+
+        var remaining = _installationService.GetPendingRecoveryBranches();
+        if (remaining.Count == 0)
+        {
+            AppendLog("Interrupted-operation recovery completed successfully.");
+            return true;
+        }
+
+        AppendLog("Recovery is still required for: " + string.Join(", ", remaining.Select(DisplayBranch)) + ". Mutation actions for those clients remain blocked.");
+        return false;
     }
 
     private void Window_Closed(object? sender, EventArgs e)
@@ -65,6 +94,14 @@ public partial class MainWindow : Window
             _smoothScrollRenderingSubscribed = false;
         }
         _installationService.Dispose();
+    }
+
+    private void Window_Closing(object? sender, CancelEventArgs e)
+    {
+        if (!_busy || _allowCloseWhileBusy) return;
+        e.Cancel = true;
+        ProgressText.Text = "Finish the current operation before closing";
+        AppendLog("Close request ignored while a Vencord operation is active. This protects the selected Discord client from a partial mutation.");
     }
 
     private void Window_StateChanged(object? sender, EventArgs e)
@@ -118,16 +155,26 @@ public partial class MainWindow : Window
         if (_manifest is null) return;
 
         VerifyLocalInstallation(logResult: false);
-        var installed = HasManagedInstallationDetected()
-            && !string.IsNullOrWhiteSpace(_state.InstalledVersion);
+        if (!TryResolveActionBranch(out var targetBranch, out var actionError))
+        {
+            await ShowDialogAsync("Choose a Discord client", actionError, "Done", showCancel: false, DialogTone.Warning);
+            return;
+        }
+
+        var targetProbe = _clientProbes.TryGetValue(targetBranch, out var exactProbe) ? exactProbe : null;
+        var targetVersion = _installationService.GetInstalledVersion(targetBranch, _state);
+        var installed = targetProbe?.IsManagedPatch == true && !string.IsNullOrWhiteSpace(targetVersion);
         var action = installed ? "Update" : "Install";
-        var selectedClient = SelectedClientDisplayName();
-        var replacingOtherVencord = _localProbe?.IsPatched == true && _localProbe.IsManagedPatch == false;
-        var prompt = installed
-            ? $"This will update the shared Custom Vencord build from v{_state.InstalledVersion} to v{_manifest.Version} and verify {selectedClient}. Any other Discord channels already using this managed build will continue using the same updated files."
+        var selectedClient = DisplayBranch(targetBranch);
+        var replacingOtherVencord = targetProbe?.IsPatched == true && targetProbe.IsManagedPatch == false;
+        var migratingLegacy = targetProbe?.IsLegacyManagedPatch == true;
+        var prompt = migratingLegacy
+            ? $"This will migrate {selectedClient} from the old shared Custom Vencord payload to its own isolated payload. Stable, PTB, and Canary will no longer share this client's build files. Only {selectedClient} will be closed and modified."
+            : installed
+            ? $"This will update Custom Vencord from v{targetVersion} to v{_manifest.Version} for {selectedClient} only. Other Discord channels will keep their current payloads and versions."
             : replacingOtherVencord
                 ? $"{selectedClient} currently has a different Vencord injection. Installing Custom Vencord v{_manifest.Version} will replace that injection for this client while leaving the other Discord channels alone."
-                : $"This will install Custom Vencord v{_manifest.Version} for {selectedClient}. If the latest managed build is already present for another Discord channel, the manager will reuse it instead of downloading it again.";
+                : $"This will install Custom Vencord v{_manifest.Version} for {selectedClient} only. Stable, PTB, and Canary use separate managed payloads.";
 
         if (!await ShowDialogAsync(
                 $"{action} Custom Vencord?",
@@ -139,41 +186,53 @@ public partial class MainWindow : Window
 
         await RunOperationAsync(
             $"Starting {action.ToLowerInvariant()}…",
-            progress => _installationService.InstallOrUpdateAsync(_manifest, SelectedBranch(), repair: false, progress),
+            progress => _installationService.InstallOrUpdateAsync(_manifest, targetBranch, repair: false, progress),
             completionTitle: $"{action} verified",
-            completionMessage: $"Custom Vencord v{_manifest.Version} is installed and the Discord injection was verified successfully.");
+            completionMessage: $"Custom Vencord v{_manifest.Version} was verified on {selectedClient}. No other Discord client was modified.");
     }
 
     private async void RepairButton_Click(object sender, RoutedEventArgs e)
     {
         VerifyLocalInstallation(logResult: false);
-        if (_busy || !HasManagedInstallationDetected()) return;
+        if (_busy || !HasManagedPatchOwnershipDetected()) return;
         if (_manifest is null && !await CheckForUpdatesAsync(false)) return;
         if (_manifest is null) return;
+        if (!TryResolveActionBranch(out var targetBranch, out var actionError))
+        {
+            await ShowDialogAsync("Choose a Discord client", actionError, "Done", showCancel: false, DialogTone.Warning);
+            return;
+        }
+        var selectedClient = DisplayBranch(targetBranch);
 
         if (!await ShowDialogAsync(
-                "Repair Custom Vencord?",
-                "The manager will redownload the latest verified package, preserve a rollback copy, replace the managed files, and run Vencord's repair step. Discord will close briefly.",
-                "Repair",
+            "Repair Custom Vencord?",
+            $"The manager will repair {selectedClient} only. It will redownload the latest verified package, back up this client's payload, replace only this client's managed files, and verify only this client's injection.",
+            "Repair",
                 showCancel: true,
                 DialogTone.Accent))
             return;
 
         await RunOperationAsync(
             "Starting repair…",
-            progress => _installationService.RepairAsync(_manifest, SelectedBranch(), progress),
+            progress => _installationService.RepairAsync(_manifest, targetBranch, progress),
             completionTitle: "Repair verified",
-            completionMessage: "The managed files were replaced and the Discord injection was verified successfully.");
+            completionMessage: $"{selectedClient} was repaired and verified. Other Discord clients were not modified.");
     }
 
     private async void UninstallButton_Click(object sender, RoutedEventArgs e)
     {
         VerifyLocalInstallation(logResult: false);
-        if (_busy || !HasManagedInstallationDetected()) return;
+        if (_busy || !HasManagedPatchOwnershipDetected()) return;
+        if (!TryResolveActionBranch(out var targetBranch, out var actionError))
+        {
+            await ShowDialogAsync("Choose a Discord client", actionError, "Done", showCancel: false, DialogTone.Warning);
+            return;
+        }
+        var selectedClient = DisplayBranch(targetBranch);
 
         if (!await ShowDialogAsync(
-                "Uninstall Custom Vencord?",
-                "This removes the managed Custom Vencord installation from Discord. Your runtime plugins folder is kept, so your personal .js plugins will not be deleted.",
+            "Uninstall Custom Vencord?",
+            $"This removes Custom Vencord from {selectedClient} only. Stable, PTB, and Canary are handled independently. Your shared runtime plugins folder is kept.",
                 "Uninstall",
                 showCancel: true,
                 DialogTone.Danger))
@@ -181,9 +240,9 @@ public partial class MainWindow : Window
 
         await RunOperationAsync(
             "Starting uninstall…",
-            progress => _installationService.UninstallAsync(SelectedBranch(), progress),
+            progress => _installationService.UninstallAsync(targetBranch, progress),
             completionTitle: "Uninstall verified",
-            completionMessage: "The managed Custom Vencord injection was removed and the Discord installation was verified clean.");
+            completionMessage: $"Custom Vencord was removed from {selectedClient} only and the client was verified clean.");
     }
 
     private void OpenPluginsButton_Click(object sender, RoutedEventArgs e)
@@ -195,7 +254,10 @@ public partial class MainWindow : Window
     private void OpenInstallButton_Click(object sender, RoutedEventArgs e)
     {
         ManagerPaths.EnsureCreated();
-        OpenFolder(Directory.Exists(ManagerPaths.InstallDirectory) ? ManagerPaths.InstallDirectory : ManagerPaths.Root);
+        if (TryResolveActionBranch(out var branch, out _))
+            OpenFolder(_installationService.GetManagedInstallDirectoryForBranch(branch));
+        else
+            OpenFolder(ManagerPaths.Root);
     }
 
     private void ViewRelease_Click(object sender, RoutedEventArgs e)
@@ -218,10 +280,18 @@ public partial class MainWindow : Window
                 DialogTone.Accent))
             return;
 
-        await RunOperationAsync(
-            "Starting manager update…",
-            progress => _installationService.SelfUpdater.DownloadAndRestartAsync(_manifest, progress),
-            showCompletionDialog: false);
+        _allowCloseWhileBusy = true;
+        try
+        {
+            await RunOperationAsync(
+                "Starting manager update…",
+                progress => _installationService.SelfUpdater.DownloadAndRestartAsync(_manifest, progress),
+                showCompletionDialog: false);
+        }
+        finally
+        {
+            _allowCloseWhileBusy = false;
+        }
     }
 
     private async Task<bool> CheckForUpdatesAsync(bool showSuccessDialog)
@@ -240,12 +310,16 @@ public partial class MainWindow : Window
         try
         {
             _manifest = await _installationService.GetManifestAsync();
-            _state = _installationService.RecoverStateFromLocalInstallation(SelectedBranch(), _manifest);
+            _state = _installationService.RecoverAllStateFromLocalInstallations(_manifest);
             RefreshClientProbes();
             _localProbe = ResolveSelectedProbe();
             AppendLog($"Latest distribution: v{_manifest.Version} (OrionQuests v{_manifest.Components.OrionQuests}).");
-            if (HasManagedInstallationDetected() && !string.IsNullOrWhiteSpace(_state.InstalledVersion))
-                AppendLog($"{SelectedClientDisplayName()} verified as Custom Vencord v{_state.InstalledVersion}.");
+            var selectedStateBranch = ResolveSelectedStateBranch();
+            var selectedVersion = selectedStateBranch is null
+                ? string.Empty
+                : _installationService.GetInstalledVersion(selectedStateBranch, _state);
+            if (HasManagedPatchOwnershipDetected() && !string.IsNullOrWhiteSpace(selectedVersion))
+                AppendLog($"{SelectedClientDisplayName()} verified as Custom Vencord v{selectedVersion}.");
             RefreshUi();
             ProgressText.Text = "Update check complete";
 
@@ -263,6 +337,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            _manifest = null;
             AppendLog("ERROR: " + ex.Message);
             StatusText.Text = "Update check failed";
             SetStatusVisual(DialogTone.Danger);
@@ -324,7 +399,7 @@ public partial class MainWindow : Window
         try
         {
             await action(progress);
-            _state = _installationService.RecoverStateFromLocalInstallation(SelectedBranch(), _manifest);
+            _state = _installationService.RecoverAllStateFromLocalInstallations(_manifest);
             RefreshClientProbes();
             _localProbe = ResolveSelectedProbe();
             OperationProgressBar.IsIndeterminate = false;
@@ -367,16 +442,24 @@ public partial class MainWindow : Window
         RefreshClientProbes();
         _localProbe = ResolveSelectedProbe();
         var selectedDiscordFound = _localProbe is not null;
-        var managedDetected = HasManagedInstallationDetected();
-        var installed = managedDetected && !string.IsNullOrWhiteSpace(_state.InstalledVersion);
+        var managedOwnership = HasManagedPatchOwnershipDetected();
+        var managedPayloadHealthy = HasHealthyManagedInstallationDetected();
+        var selectedStateBranch = ResolveSelectedStateBranch();
+        var pendingRecovery = selectedStateBranch is not null && _installationService.HasPendingRecovery(selectedStateBranch);
+        var selectedVersion = selectedStateBranch is null
+            ? string.Empty
+            : _installationService.GetInstalledVersion(selectedStateBranch, _state);
+        var installed = managedOwnership && !string.IsNullOrWhiteSpace(selectedVersion);
         var otherVencordDetected = _localProbe?.IsPatched == true && _localProbe.IsManagedPatch == false;
+        var legacyManaged = _localProbe?.IsLegacyManagedPatch == true;
+        var autoAmbiguous = SelectedBranch().Equals("auto", StringComparison.OrdinalIgnoreCase) && _clientProbes.Count > 1;
 
         SelectedChannelText.Text = SelectedChannelLabel();
         RefreshClientStatusIndicators();
 
         InstalledVersionText.Text = installed
-            ? $"v{_state.InstalledVersion}"
-            : managedDetected
+            ? $"v{selectedVersion}"
+            : managedOwnership
                 ? "Detected"
                 : otherVencordDetected
                     ? "Vencord"
@@ -386,11 +469,17 @@ public partial class MainWindow : Window
         DialogTone statusTone;
         if (_manifest is null)
         {
-            StatusText.Text = !selectedDiscordFound
+            StatusText.Text = pendingRecovery
+                ? "Interrupted operation · recovery required"
+                : !selectedDiscordFound
                 ? $"{SelectedClientDisplayName()} not found"
+                : autoAmbiguous
+                    ? "Select a Discord client"
+                : managedOwnership && !managedPayloadHealthy
+                    ? "Custom Vencord injection is broken"
                 : installed
                     ? "Installed · locally verified"
-                    : managedDetected
+                    : managedOwnership
                         ? "Custom Vencord detected · checking version"
                         : otherVencordDetected
                             ? "Existing Vencord detected"
@@ -408,14 +497,29 @@ public partial class MainWindow : Window
             NitroVersionText.Text = _manifest.Components.NitroSniper;
             LoaderStatusText.Text = _manifest.Components.RuntimePluginLoader ? "Included" : "Not included";
 
-            if (!selectedDiscordFound)
+            if (pendingRecovery)
+            {
+                StatusText.Text = "Interrupted operation · recovery required before changes";
+                statusTone = DialogTone.Danger;
+            }
+            else if (autoAmbiguous)
+            {
+                StatusText.Text = "Select Stable, PTB, or Canary to continue";
+                statusTone = DialogTone.Warning;
+            }
+            else if (!selectedDiscordFound)
             {
                 StatusText.Text = $"{SelectedClientDisplayName()} not found";
                 statusTone = DialogTone.Warning;
             }
+            else if (managedOwnership && !managedPayloadHealthy)
+            {
+                StatusText.Text = "Custom Vencord injection found · payload missing or damaged";
+                statusTone = DialogTone.Danger;
+            }
             else if (!installed)
             {
-                if (managedDetected)
+                if (managedOwnership)
                 {
                     StatusText.Text = $"Local Custom Vencord detected · latest is v{_manifest.Version}";
                     statusTone = DialogTone.Warning;
@@ -433,8 +537,13 @@ public partial class MainWindow : Window
             }
             else
             {
-                var comparison = UpdateClient.CompareVersions(_state.InstalledVersion, _manifest.Version);
-                if (comparison < 0)
+                var comparison = UpdateClient.CompareVersions(selectedVersion, _manifest.Version);
+                if (legacyManaged)
+                {
+                    StatusText.Text = $"Migration required · isolate {SelectedClientDisplayName()}";
+                    statusTone = DialogTone.Warning;
+                }
+                else if (comparison < 0)
                 {
                     StatusText.Text = $"Update available · v{_manifest.Version}";
                     statusTone = DialogTone.Warning;
@@ -456,10 +565,20 @@ public partial class MainWindow : Window
 
         var updateAvailable = _manifest is not null
             && selectedDiscordFound
-            && (!installed || UpdateClient.CompareVersions(_state.InstalledVersion, _manifest.Version) < 0);
+            && !autoAmbiguous
+            && !pendingRecovery
+            && (!installed || legacyManaged || UpdateClient.CompareVersions(selectedVersion, _manifest.Version) < 0);
 
-        PrimaryButton.Content = !selectedDiscordFound
+        PrimaryButton.Content = pendingRecovery
+            ? "Recovery required"
+            : autoAmbiguous
+            ? "Select a client to continue"
+            : !selectedDiscordFound
             ? "Discord client not found"
+            : managedOwnership && !managedPayloadHealthy
+                ? "Use Repair below"
+            : legacyManaged
+                ? "Isolate this client  →"
             : !installed
                 ? otherVencordDetected
                     ? "Install Custom Vencord  →"
@@ -468,7 +587,11 @@ public partial class MainWindow : Window
                     ? $"Update to v{_manifest!.Version}  →"
                     : "You're up to date";
 
-        PrimaryButton.IsEnabled = !_busy && _manifest is not null && updateAvailable;
+        PrimaryButton.IsEnabled = !_busy
+            && _manifest is not null
+            && updateAvailable
+            && !pendingRecovery
+            && !(managedOwnership && !managedPayloadHealthy);
         ManagerVersionText.Text = $"v{AppInfo.CurrentVersion}";
         var managerUpdateAvailable = SelfUpdateService.IsUpdateAvailable(_manifest);
         ManagerUpdateButton.Visibility = managerUpdateAvailable ? Visibility.Visible : Visibility.Collapsed;
@@ -477,23 +600,27 @@ public partial class MainWindow : Window
             : "Update manager";
         ManagerUpdateButton.IsEnabled = !_busy && managerUpdateAvailable;
         CheckButton.IsEnabled = !_busy;
-        RepairButton.IsEnabled = !_busy && managedDetected && _manifest is not null;
-        UninstallButton.IsEnabled = !_busy && managedDetected;
+        RepairButton.IsEnabled = !_busy && !autoAmbiguous && !pendingRecovery && managedOwnership && _manifest is not null;
+        // Uninstall remains available even if the payload files are missing, as long as the
+        // Discord injection is manager-owned. This lets users recover from broken installs.
+        UninstallButton.IsEnabled = !_busy && !autoAmbiguous && !pendingRecovery && managedOwnership;
         OpenPluginsButton.IsEnabled = !_busy;
-        OpenInstallButton.IsEnabled = !_busy && _installationService.HasManagedFiles();
+        OpenInstallButton.IsEnabled = !_busy && _installationService.HasAnyManagedFiles();
         SetBranchControlsEnabled(!_busy);
     }
 
     private void VerifyLocalInstallation(bool logResult)
     {
-        _state = _installationService.RecoverStateFromLocalInstallation(SelectedBranch(), _manifest);
+        _state = _installationService.RecoverAllStateFromLocalInstallations(_manifest);
         RefreshClientProbes();
         _localProbe = ResolveSelectedProbe();
 
         if (!logResult) return;
         if (_localProbe is null)
         {
-            AppendLog("Local verification: no Discord installation was found for the selected channel.");
+            AppendLog(SelectedBranch().Equals("auto", StringComparison.OrdinalIgnoreCase) && _clientProbes.Count > 1
+                ? "Local verification: multiple Discord clients were found; select Stable, PTB, or Canary to inspect or modify one client."
+                : "Local verification: no Discord installation was found for the selected channel.");
             return;
         }
 
@@ -512,8 +639,10 @@ public partial class MainWindow : Window
         AppendLog($"Local verification: {DisplayBranch(_localProbe.Branch)} is installed but has no Vencord injection.");
     }
 
-    private bool HasManagedInstallationDetected() =>
-        _localProbe?.IsManagedPatch == true && _installationService.HasManagedFiles();
+    private bool HasManagedPatchOwnershipDetected() => _localProbe?.IsManagedPatch == true;
+
+    private bool HasHealthyManagedInstallationDetected() =>
+        _localProbe?.IsManagedPatch == true && _installationService.HasUsableManagedPayload(_localProbe);
 
     private void RefreshClientProbes()
     {
@@ -528,12 +657,45 @@ public partial class MainWindow : Window
         if (!selected.Equals("auto", StringComparison.OrdinalIgnoreCase))
             return _clientProbes.TryGetValue(selected, out var exact) ? exact : null;
 
-        foreach (var branch in new[] { "stable", "canary", "ptb" })
+        return _clientProbes.Count == 1 ? _clientProbes.Values.Single() : null;
+    }
+
+    private string? ResolveSelectedStateBranch()
+    {
+        var selected = SelectedBranch();
+        if (!selected.Equals("auto", StringComparison.OrdinalIgnoreCase)) return selected;
+        return _localProbe?.Branch;
+    }
+
+    private bool TryResolveActionBranch(out string branch, out string error)
+    {
+        var selected = SelectedBranch();
+        if (!selected.Equals("auto", StringComparison.OrdinalIgnoreCase))
         {
-            if (_clientProbes.TryGetValue(branch, out var probe)) return probe;
+            if (_clientProbes.ContainsKey(selected))
+            {
+                branch = selected;
+                error = string.Empty;
+                return true;
+            }
+
+            branch = string.Empty;
+            error = $"{DisplayBranch(selected)} is not installed on this PC.";
+            return false;
         }
 
-        return null;
+        if (_clientProbes.Count == 1)
+        {
+            branch = _clientProbes.Keys.Single();
+            error = string.Empty;
+            return true;
+        }
+
+        branch = string.Empty;
+        error = _clientProbes.Count == 0
+            ? "No Discord desktop client was found."
+            : "More than one Discord client is installed. Select Stable, PTB, or Canary explicitly before installing, repairing, or uninstalling.";
+        return false;
     }
 
     private void RefreshClientStatusIndicators()
@@ -555,11 +717,22 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (probe.IsManagedPatch && _installationService.HasManagedFiles())
+        if (probe.IsManagedPatch && !_installationService.HasUsableManagedPayload(probe))
         {
-            text.Text = string.IsNullOrWhiteSpace(_state.InstalledVersion)
-                ? "Custom Vencord"
-                : $"Custom v{_state.InstalledVersion}";
+            text.Text = "Broken Custom Vencord";
+            text.Foreground = DangerBrush;
+            dot.Fill = DangerBrush;
+            badge.Background = DangerSoftBrush;
+            badge.BorderBrush = DangerBorderBrush;
+            return;
+        }
+
+        if (probe.IsManagedPatch)
+        {
+            var version = _installationService.GetInstalledVersion(branch, _state);
+            text.Text = probe.IsLegacyManagedPatch
+                ? string.IsNullOrWhiteSpace(version) ? "Legacy Custom Vencord" : $"Legacy v{version}"
+                : string.IsNullOrWhiteSpace(version) ? "Custom Vencord" : $"Custom v{version}";
             text.Foreground = SuccessBrush;
             dot.Fill = SuccessBrush;
             badge.Background = SuccessSoftBrush;
@@ -590,6 +763,7 @@ public partial class MainWindow : Window
         if (!selected.Equals("auto", StringComparison.OrdinalIgnoreCase))
             return DisplayBranch(selected).Replace("Discord ", string.Empty, StringComparison.Ordinal) + " channel";
 
+        if (_clientProbes.Count > 1) return "Auto · multiple clients";
         return _localProbe is null
             ? "Auto · no client found"
             : $"Auto → {DisplayBranch(_localProbe.Branch).Replace("Discord ", string.Empty, StringComparison.Ordinal)}";
@@ -599,6 +773,7 @@ public partial class MainWindow : Window
     {
         var selected = SelectedBranch();
         if (!selected.Equals("auto", StringComparison.OrdinalIgnoreCase)) return DisplayBranch(selected);
+        if (_clientProbes.Count > 1) return "Discord clients";
         return _localProbe is null ? "Discord" : DisplayBranch(_localProbe.Branch);
     }
 

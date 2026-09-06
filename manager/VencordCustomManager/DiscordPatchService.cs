@@ -35,17 +35,37 @@ public sealed partial class DiscordPatchService
     public IReadOnlyList<DiscordInstallProbe> ProbeAll() =>
         Variants.Select(x => ProbeVariant(x.Branch, x.Folder)).Where(x => x is not null).Cast<DiscordInstallProbe>().ToArray();
 
+    public DiscordInstallProbe? ProbeLocalResourcesForRollback(string branch, string resourcesDirectory)
+    {
+        branch = NormalizeExactBranch(branch);
+        ValidateResourcesDirectory(branch, resourcesDirectory);
+        return ProbeResources(branch, resourcesDirectory);
+    }
+
     public DiscordInstallProbe EnsureManagedPatch(string branch, IProgress<OperationProgress>? progress = null)
     {
-        var expectedPatcher = Path.Combine(ManagerPaths.InstallDirectory, "dist", "patcher.js");
+        branch = NormalizeExactBranch(branch);
+        var probe = Probe(branch) ?? throw new InvalidOperationException($"Discord {DisplayBranch(branch)} was not found on this PC.");
+        return EnsureManagedPatchAtResources(branch, probe.ResourcesDirectory, progress);
+    }
+
+    public DiscordInstallProbe EnsureManagedPatchAtResources(
+        string branch,
+        string resourcesDirectory,
+        IProgress<OperationProgress>? progress = null)
+    {
+        branch = NormalizeExactBranch(branch);
+        ValidateResourcesDirectory(branch, resourcesDirectory);
+        var expectedPatcher = Path.Combine(ManagerPaths.GetInstallDirectory(branch), "dist", "patcher.js");
         if (!File.Exists(expectedPatcher))
             throw new InvalidOperationException("The managed Vencord patcher is missing. Reinstall the release files first.");
 
-        var probe = Probe(branch) ?? throw new InvalidOperationException($"Discord {DisplayBranch(branch)} was not found on this PC.");
-        if (probe.IsPatched && probe.IsManagedPatch)
+        var probe = ProbeResources(branch, resourcesDirectory)
+            ?? throw new InvalidOperationException($"The selected {DisplayBranch(branch)} resources directory is no longer valid.");
+        if (probe.IsPatched && probe.IsBranchScopedManagedPatch)
         {
             progress?.Report(new OperationProgress($"Existing {DisplayBranch(probe.Branch)} injection already points to this manager."));
-            return VerifyManagedPatch(probe.Branch, progress);
+            return VerifyManagedPatchAtResources(probe.Branch, resourcesDirectory, progress);
         }
 
         if (probe.IsPatched)
@@ -56,19 +76,32 @@ public sealed partial class DiscordPatchService
 
         progress?.Report(new OperationProgress($"Injecting Custom Vencord into {DisplayBranch(probe.Branch)}…"));
         PatchResources(probe.ResourcesDirectory, expectedPatcher);
-        return VerifyManagedPatch(probe.Branch, progress);
+        return VerifyManagedPatchAtResources(probe.Branch, resourcesDirectory, progress);
     }
 
     public DiscordInstallProbe VerifyManagedPatch(string branch, IProgress<OperationProgress>? progress = null)
     {
-        progress?.Report(new OperationProgress("Verifying Discord injection…"));
+        branch = NormalizeExactBranch(branch);
         var probe = Probe(branch) ?? throw new InvalidOperationException($"Discord {DisplayBranch(branch)} could not be found during verification.");
+        return VerifyManagedPatchAtResources(branch, probe.ResourcesDirectory, progress);
+    }
+
+    public DiscordInstallProbe VerifyManagedPatchAtResources(
+        string branch,
+        string resourcesDirectory,
+        IProgress<OperationProgress>? progress = null)
+    {
+        branch = NormalizeExactBranch(branch);
+        ValidateResourcesDirectory(branch, resourcesDirectory);
+        progress?.Report(new OperationProgress("Verifying Discord injection…"));
+        var probe = ProbeResources(branch, resourcesDirectory)
+            ?? throw new InvalidOperationException($"The selected {DisplayBranch(branch)} resources directory could not be read during verification.");
         if (!probe.IsPatched)
             throw new InvalidDataException($"Verification failed: {DisplayBranch(probe.Branch)} is not patched.");
-        if (!probe.IsManagedPatch)
-            throw new InvalidDataException($"Verification failed: {DisplayBranch(probe.Branch)} points to a different Vencord installation.");
+        if (!probe.IsBranchScopedManagedPatch)
+            throw new InvalidDataException($"Verification failed: {DisplayBranch(probe.Branch)} does not point to its client-specific managed Vencord payload.");
 
-        var expectedPatcher = Path.Combine(ManagerPaths.InstallDirectory, "dist", "patcher.js");
+        var expectedPatcher = Path.Combine(ManagerPaths.GetInstallDirectory(branch), "dist", "patcher.js");
         if (!File.Exists(expectedPatcher))
             throw new InvalidDataException("Verification failed: the managed patcher file is missing.");
 
@@ -78,6 +111,7 @@ public sealed partial class DiscordPatchService
 
     public void UnpatchManaged(string branch, IProgress<OperationProgress>? progress = null)
     {
+        branch = NormalizeExactBranch(branch);
         var probe = Probe(branch);
         if (probe is null || !probe.IsPatched) return;
         if (!probe.IsManagedPatch)
@@ -92,19 +126,163 @@ public sealed partial class DiscordPatchService
         progress?.Report(new OperationProgress("Discord injection removal verified.", 100));
     }
 
+    public int UnpatchAllManagedForBranch(string branch, IProgress<OperationProgress>? progress = null)
+    {
+        branch = NormalizeExactBranch(branch);
+        var variant = Variants.First(x => x.Branch.Equals(branch, StringComparison.OrdinalIgnoreCase));
+        var baseDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), variant.Folder);
+        if (!Directory.Exists(baseDirectory)) return 0;
+
+        var branchManagedTarget = Path.Combine(ManagerPaths.GetInstallDirectory(branch), "dist", "patcher.js");
+        var legacyManagedTarget = Path.Combine(ManagerPaths.LegacyInstallDirectory, "dist", "patcher.js");
+        var removed = 0;
+
+        foreach (var appDirectory in new DirectoryInfo(baseDirectory)
+                     .EnumerateDirectories("app-*", SearchOption.TopDirectoryOnly)
+                     .OrderByDescending(x => ParseAppVersion(x.Name)))
+        {
+            var resources = Path.Combine(appDirectory.FullName, "resources");
+            var appAsar = Path.Combine(resources, "app.asar");
+            var backupAsar = Path.Combine(resources, "_app.asar");
+            var interruptedOld = Path.Combine(resources, "app.asar.manager-old");
+
+            if (File.Exists(interruptedOld))
+            {
+                progress?.Report(new OperationProgress($"Recovering interrupted uninstall in {DisplayBranch(branch)} {appDirectory.Name}…"));
+                RecoverResourcesToUnpatched(branch, resources);
+                removed++;
+                continue;
+            }
+            if (!File.Exists(appAsar) || !File.Exists(backupAsar)) continue;
+
+            var target = ReadPatchTarget(appAsar);
+            if (!PathsEqual(target, branchManagedTarget) && !PathsEqual(target, legacyManagedTarget)) continue;
+
+            progress?.Report(new OperationProgress($"Removing manager-owned injection from {DisplayBranch(branch)} {appDirectory.Name}…"));
+            UnpatchResources(resources);
+            removed++;
+        }
+
+        if (AnyBranchPatchReferences(branch, branchManagedTarget) || AnyBranchPatchReferences(branch, legacyManagedTarget))
+            throw new InvalidDataException($"Uninstall verification failed: a manager-owned {DisplayBranch(branch)} injection is still present.");
+
+        progress?.Report(new OperationProgress($"Verified {DisplayBranch(branch)} manager-owned injections removed.", 100));
+        return removed;
+    }
+
     public void RestorePatchTarget(string branch, string patchTarget)
     {
-        if (string.IsNullOrWhiteSpace(patchTarget) || !File.Exists(patchTarget)) return;
+        branch = NormalizeExactBranch(branch);
         var probe = Probe(branch);
-        if (probe is null) return;
-        if (probe.IsPatched) UnpatchResources(probe.ResourcesDirectory);
-        PatchResources(probe.ResourcesDirectory, patchTarget);
+        if (probe is null) throw new InvalidOperationException($"{DisplayBranch(branch)} disappeared during rollback.");
+        RestorePatchTargetAtResources(branch, probe.ResourcesDirectory, patchTarget);
+    }
+
+    public void RestorePatchTargetAtResources(string branch, string resourcesDirectory, string patchTarget)
+    {
+        branch = NormalizeExactBranch(branch);
+        ValidateResourcesDirectory(branch, resourcesDirectory);
+        if (string.IsNullOrWhiteSpace(patchTarget) || !File.Exists(patchTarget))
+            throw new InvalidOperationException("The previous Vencord patch target is no longer available for rollback.");
+
+        var probe = ProbeResources(branch, resourcesDirectory)
+            ?? throw new InvalidOperationException("The previously modified Discord resources directory no longer exists.");
+        if (probe.IsPatched) UnpatchResources(resourcesDirectory);
+        PatchResources(resourcesDirectory, patchTarget);
+
+        var restored = ProbeResources(branch, resourcesDirectory);
+        if (restored?.IsPatched != true || !PathsEqual(restored.PatchTarget, patchTarget))
+            throw new InvalidDataException("Rollback verification failed for the exact Discord resources directory.");
     }
 
     public void EnsureUnpatched(string branch)
     {
+        branch = NormalizeExactBranch(branch);
         var probe = Probe(branch);
-        if (probe?.IsPatched == true) UnpatchResources(probe.ResourcesDirectory);
+        if (probe is not null) EnsureUnpatchedAtResources(branch, probe.ResourcesDirectory);
+    }
+
+    public void EnsureUnpatchedAtResources(string branch, string resourcesDirectory)
+    {
+        branch = NormalizeExactBranch(branch);
+        ValidateResourcesDirectory(branch, resourcesDirectory);
+        var probe = ProbeResources(branch, resourcesDirectory);
+        if (probe?.IsPatched == true) UnpatchResources(resourcesDirectory);
+        var verified = ProbeResources(branch, resourcesDirectory);
+        if (verified is null)
+            throw new InvalidDataException("Unpatch verification failed: Discord app.asar is missing or unreadable.");
+        if (verified.IsPatched)
+            throw new InvalidDataException("Unpatch verification failed for the exact Discord resources directory.");
+    }
+
+    public void RecoverResourcesToSnapshot(
+        string branch,
+        string resourcesDirectory,
+        bool wasPatched,
+        string previousPatchTarget)
+    {
+        branch = NormalizeExactBranch(branch);
+        ValidateResourcesDirectory(branch, resourcesDirectory);
+        NormalizeResourcesToUnpatched(resourcesDirectory);
+
+        var unpatched = ProbeResources(branch, resourcesDirectory);
+        if (unpatched is null || unpatched.IsPatched)
+            throw new InvalidDataException("Could not recover Discord to a verified unpatched baseline.");
+
+        if (!wasPatched) return;
+        if (string.IsNullOrWhiteSpace(previousPatchTarget) || !File.Exists(previousPatchTarget))
+            throw new InvalidOperationException("The previous Vencord patch target is no longer available for recovery.");
+
+        PatchResources(resourcesDirectory, previousPatchTarget);
+        var restored = ProbeResources(branch, resourcesDirectory);
+        if (restored?.IsPatched != true || !PathsEqual(restored.PatchTarget, previousPatchTarget))
+            throw new InvalidDataException("Discord patch recovery could not restore the exact previous injection.");
+    }
+
+    public void RecoverResourcesToUnpatched(string branch, string resourcesDirectory)
+    {
+        branch = NormalizeExactBranch(branch);
+        ValidateResourcesDirectory(branch, resourcesDirectory);
+        NormalizeResourcesToUnpatched(resourcesDirectory);
+        var verified = ProbeResources(branch, resourcesDirectory);
+        if (verified is null || verified.IsPatched)
+            throw new InvalidDataException("Discord unpatch recovery could not be verified.");
+    }
+
+    public bool AnyDiscordPatchReferences(string patcherPath)
+    {
+        if (string.IsNullOrWhiteSpace(patcherPath)) return false;
+        foreach (var variant in Variants)
+        {
+            var baseDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), variant.Folder);
+            if (!Directory.Exists(baseDirectory)) continue;
+
+            foreach (var appDirectory in new DirectoryInfo(baseDirectory).EnumerateDirectories("app-*", SearchOption.TopDirectoryOnly))
+            {
+                var resources = Path.Combine(appDirectory.FullName, "resources");
+                var appAsar = Path.Combine(resources, "app.asar");
+                var backupAsar = Path.Combine(resources, "_app.asar");
+                if (!File.Exists(appAsar) || !File.Exists(backupAsar)) continue;
+                if (PathsEqual(ReadPatchTarget(appAsar), patcherPath)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static bool AnyBranchPatchReferences(string branch, string patcherPath)
+    {
+        var variant = Variants.First(x => x.Branch.Equals(branch, StringComparison.OrdinalIgnoreCase));
+        var baseDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), variant.Folder);
+        if (!Directory.Exists(baseDirectory)) return false;
+        foreach (var appDirectory in new DirectoryInfo(baseDirectory).EnumerateDirectories("app-*", SearchOption.TopDirectoryOnly))
+        {
+            var resources = Path.Combine(appDirectory.FullName, "resources");
+            var appAsar = Path.Combine(resources, "app.asar");
+            var backupAsar = Path.Combine(resources, "_app.asar");
+            if (!File.Exists(appAsar) || !File.Exists(backupAsar)) continue;
+            if (PathsEqual(ReadPatchTarget(appAsar), patcherPath)) return true;
+        }
+        return false;
     }
 
     private static DiscordInstallProbe? ProbeVariant(string branch, string folder)
@@ -116,15 +294,48 @@ public sealed partial class DiscordPatchService
         if (appDirectory is null) return null;
 
         var resources = Path.Combine(appDirectory.FullName, "resources");
+        return ProbeResources(branch, resources);
+    }
+
+    private static DiscordInstallProbe? ProbeResources(string branch, string resources)
+    {
+        var variant = Variants.FirstOrDefault(x => x.Branch.Equals(branch, StringComparison.OrdinalIgnoreCase));
+        if (string.IsNullOrWhiteSpace(variant.Branch)) return null;
+        var baseDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), variant.Folder);
         var appAsar = Path.Combine(resources, "app.asar");
         var backupAsar = Path.Combine(resources, "_app.asar");
         if (!Directory.Exists(resources) || !File.Exists(appAsar)) return null;
 
         var patched = File.Exists(backupAsar);
         var patchTarget = patched ? ReadPatchTarget(appAsar) : string.Empty;
-        var managedTarget = Path.Combine(ManagerPaths.InstallDirectory, "dist", "patcher.js");
-        var isManaged = patched && PathsEqual(patchTarget, managedTarget);
-        return new DiscordInstallProbe(branch, baseDirectory, resources, appAsar, backupAsar, patched, patchTarget, isManaged);
+        var branchManagedTarget = Path.Combine(ManagerPaths.GetInstallDirectory(branch), "dist", "patcher.js");
+        var legacyManagedTarget = Path.Combine(ManagerPaths.LegacyInstallDirectory, "dist", "patcher.js");
+        var isBranchScopedManaged = patched && PathsEqual(patchTarget, branchManagedTarget);
+        var isLegacyManaged = patched && PathsEqual(patchTarget, legacyManagedTarget);
+        var isManaged = isBranchScopedManaged || isLegacyManaged;
+        return new DiscordInstallProbe(
+            branch,
+            baseDirectory,
+            resources,
+            appAsar,
+            backupAsar,
+            patched,
+            patchTarget,
+            isManaged,
+            isBranchScopedManaged,
+            isLegacyManaged);
+    }
+
+    private static void ValidateResourcesDirectory(string branch, string resourcesDirectory)
+    {
+        var variant = Variants.First(x => x.Branch.Equals(branch, StringComparison.OrdinalIgnoreCase));
+        var baseDirectory = Path.GetFullPath(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            variant.Folder)).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var candidate = Path.GetFullPath(resourcesDirectory);
+        if (!candidate.StartsWith(baseDirectory, StringComparison.OrdinalIgnoreCase)
+            || !Path.GetFileName(candidate).Equals("resources", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Refusing to modify a Discord resources directory outside the selected client.");
     }
 
     private static DirectoryInfo? FindLatestAppDirectory(string baseDirectory)
@@ -206,6 +417,31 @@ public sealed partial class DiscordPatchService
         }
     }
 
+    private static void NormalizeResourcesToUnpatched(string resourcesDirectory)
+    {
+        var appAsar = Path.Combine(resourcesDirectory, "app.asar");
+        var backupAsar = Path.Combine(resourcesDirectory, "_app.asar");
+        var newAsar = Path.Combine(resourcesDirectory, "app.asar.manager-new");
+        var oldAsar = Path.Combine(resourcesDirectory, "app.asar.manager-old");
+
+        if (File.Exists(backupAsar))
+        {
+            TryDelete(appAsar);
+            File.Move(backupAsar, appAsar);
+            TryDelete(newAsar);
+            TryDelete(oldAsar);
+            return;
+        }
+
+        if (!File.Exists(appAsar))
+            throw new InvalidDataException("Discord app.asar is missing and no original _app.asar backup is available.");
+        if (!string.IsNullOrWhiteSpace(ReadPatchTarget(appAsar)))
+            throw new InvalidDataException("Discord app.asar still appears to be an injection but its original backup is missing.");
+
+        TryDelete(newAsar);
+        TryDelete(oldAsar);
+    }
+
     private static void WriteAppAsar(string outputPath, string patcherPath)
     {
         var indexJs = "require(" + JsonSerializer.Serialize(patcherPath) + ")";
@@ -258,6 +494,14 @@ public sealed partial class DiscordPatchService
         "ptb" => "ptb",
         "canary" => "canary",
         _ => "auto"
+    };
+
+    private static string NormalizeExactBranch(string branch) => branch.ToLowerInvariant() switch
+    {
+        "stable" => "stable",
+        "ptb" => "ptb",
+        "canary" => "canary",
+        _ => throw new ArgumentOutOfRangeException(nameof(branch), "A specific Discord client is required for this operation.")
     };
 
     private static string DisplayBranch(string branch) => NormalizeBranch(branch) switch

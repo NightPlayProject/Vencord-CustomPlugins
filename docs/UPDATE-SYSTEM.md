@@ -11,14 +11,17 @@ The updater should:
 5. Compare `version` against the locally installed distribution version.
 6. Download `assets.windows_release.url` only when a newer version exists.
 7. Verify the downloaded file against `assets.windows_release.sha256` before extracting anything.
-8. Ask Discord to close, then wait until Discord processes have exited.
-9. Back up the current custom Vencord folder before replacement.
-10. Replace the release files atomically where practical.
-11. Preserve `%APPDATA%\Vencord\plugins` and user settings.
-12. Ensure Discord's injected `app.asar` points to the manager-owned `dist\patcher.js`.
-13. Verify `_app.asar`, the patch target, and the managed patcher file before reporting success.
-14. Roll back the managed-file backup and previous injection target if verification or installation fails.
-15. Restart Discord only after a successful verified update.
+8. Resolve Auto to one exact Discord client; if multiple clients exist, require an explicit Stable/PTB/Canary selection.
+9. Ask only the selected Discord client to close, then wait until that client's processes have exited.
+10. Write a client-specific pending-operation journal before the first file/injection mutation.
+11. Back up only the selected client's custom Vencord folder before replacement.
+12. Replace the selected client's release files atomically where practical.
+13. Preserve `%APPDATA%\Vencord\plugins` and user settings.
+14. Ensure only the selected Discord client's injected `app.asar` points to that client's managed `dist\patcher.js`.
+15. Verify `_app.asar`, the exact patch target, and the managed payload SHA-256 fingerprints before reporting success.
+16. Roll back the selected client's managed-file backup and exact previous injection target if verification or installation fails.
+17. Recover interrupted `app.asar` rename states from the journal after a crash/power loss and fail closed if recovery cannot be verified.
+18. Restart only the selected Discord client, and only after a successful operation or verified rollback/recovery.
 
 The release version, URLs and hashes must be updated together for every publication.
 
@@ -30,10 +33,11 @@ The manager executable itself is published as a GitHub Release asset; it is not 
 
 ## Multiple Discord clients
 
-Discord Stable, PTB, and Canary are probed independently. The managed Vencord payload under `%LOCALAPPDATA%\NightPlayProject\VencordCustomPlugins\current` is shared, while each Discord client's `app.asar` injection is treated as separate state.
+Discord Stable, PTB, and Canary are probed, stored, backed up, patched, repaired and uninstalled independently. New manager-owned payloads live under `%LOCALAPPDATA%\NightPlayProject\VencordCustomPlugins\clients\<branch>`.
 
 - A client can be manager-owned, patched by another Vencord install, unpatched, or not installed.
-- Adding an already-current managed build to another Discord client only creates/verifies that client's injection; it does not redownload the release.
-- Updating the shared managed payload re-verifies every Discord client that was already pointing at it.
-- Uninstalling from one Discord client keeps the shared payload if another client still points at it.
+- Install/update/repair/uninstall operates only on the explicitly selected client.
+- Auto mode can perform mutation only when exactly one Discord client is installed; otherwise the user must choose Stable, PTB or Canary.
+- The legacy `current` payload from manager v0.1.0-v0.1.2 is preserved as a rollback/migration dependency until no live injection or pending journal needs it.
+- Each client has independent state, metadata, payload integrity hashes, backups and pending-operation journal.
 - The UI refreshes all three client statuses after selection changes and after install/update/repair/uninstall operations.

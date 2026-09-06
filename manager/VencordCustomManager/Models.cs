@@ -85,11 +85,22 @@ public sealed class ManifestAsset
 
 public sealed class ManagerState
 {
+    // Legacy v0.1.x fields are kept for migration from the original shared-payload design.
     public string InstalledVersion { get; set; } = string.Empty;
     public DateTimeOffset? InstalledAt { get; set; }
     public DateTimeOffset? LastUpdatedAt { get; set; }
     public DateTimeOffset? LastVerifiedAt { get; set; }
     public string DiscordBranch { get; set; } = "auto";
+    public string LastBackupPath { get; set; } = string.Empty;
+    public Dictionary<string, ClientInstallState> Clients { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+}
+
+public sealed class ClientInstallState
+{
+    public string InstalledVersion { get; set; } = string.Empty;
+    public DateTimeOffset? InstalledAt { get; set; }
+    public DateTimeOffset? LastUpdatedAt { get; set; }
+    public DateTimeOffset? LastVerifiedAt { get; set; }
     public string LastBackupPath { get; set; } = string.Empty;
 }
 
@@ -99,6 +110,7 @@ public sealed class ManagedInstallMetadata
     public string DiscordBranch { get; set; } = "auto";
     public DateTimeOffset PreparedAt { get; set; }
     public DateTimeOffset? VerifiedAt { get; set; }
+    public Dictionary<string, string> FileSha256 { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
 public sealed record DiscordInstallProbe(
@@ -109,7 +121,9 @@ public sealed record DiscordInstallProbe(
     string BackupAsarPath,
     bool IsPatched,
     string PatchTarget,
-    bool IsManagedPatch);
+    bool IsManagedPatch,
+    bool IsBranchScopedManagedPatch,
+    bool IsLegacyManagedPatch);
 
 public sealed record OperationProgress(string Message, double? Percent = null);
 
@@ -117,5 +131,5 @@ public sealed record DiscordRestartTarget(string Branch, string UpdateExecutable
 
 public static class AppInfo
 {
-    public const string CurrentVersion = "0.1.2";
+    public const string CurrentVersion = "0.1.3";
 }
