@@ -37,15 +37,16 @@ public sealed class DiscordService
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        var processes = GetLiveProcesses(variant.Process);
-        if (processes.Count > 0)
+        var closeDeadline = DateTime.UtcNow + CloseTimeout;
+        var initialSnapshot = GetProcessSnapshot(variant.Process);
+        if (initialSnapshot.ConfirmedLiveCount > 0)
         {
             RememberRestartTarget();
             progress?.Report(new OperationProgress($"Closing {displayName}…"));
         }
-        foreach (var process in processes)
+        foreach (var process in initialSnapshot.Processes)
         {
-            await TryStopProcessAsync(process, cancellationToken);
+            await TryStopProcessAsync(process, closeDeadline, cancellationToken);
         }
 
         // Discord/Electron can leave short-lived process objects behind after the visible
@@ -53,14 +54,13 @@ public sealed class DiscordService
         // process tree is winding down. A single immediate process-name check causes false
         // "close Discord manually" errors. Poll only the selected Discord client, discard
         // already-exited processes, and stop late-spawned instances before declaring failure.
-        var deadline = DateTime.UtcNow + CloseTimeout;
         DateTime? quietSince = null;
         var waitingReported = false;
-        while (DateTime.UtcNow < deadline)
+        while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var liveProcesses = GetLiveProcesses(variant.Process);
-            if (liveProcesses.Count == 0)
+            var snapshot = GetProcessSnapshot(variant.Process);
+            if (snapshot.IsClear)
             {
                 quietSince ??= DateTime.UtcNow;
                 if (DateTime.UtcNow - quietSince.Value >= CloseQuietPeriod)
@@ -75,7 +75,29 @@ public sealed class DiscordService
             }
 
             quietSince = null;
-            RememberRestartTarget();
+            if (snapshot.ConfirmedLiveCount > 0)
+                RememberRestartTarget();
+
+            if (DateTime.UtcNow >= closeDeadline)
+            {
+                try
+                {
+                    if (snapshot.ConfirmedLiveCount > 0)
+                    {
+                        throw new InvalidOperationException(
+                            $"{displayName} is still running in the background after several automatic close attempts. " +
+                            "End that Discord client from Task Manager, then try again.");
+                    }
+
+                    throw new InvalidOperationException(
+                        $"Could not verify that {displayName} fully closed because Windows could not inspect its process state. " +
+                        "Try the operation again.");
+                }
+                finally
+                {
+                    foreach (var process in snapshot.Processes) process.Dispose();
+                }
+            }
 
             if (!waitingReported)
             {
@@ -83,40 +105,31 @@ public sealed class DiscordService
                 waitingReported = true;
             }
 
-            foreach (var process in liveProcesses)
-                await TryStopProcessAsync(process, cancellationToken);
+            foreach (var process in snapshot.Processes)
+                await TryStopProcessAsync(process, closeDeadline, cancellationToken);
 
             await Task.Delay(ClosePollInterval, cancellationToken);
         }
-
-        var survivors = GetLiveProcesses(variant.Process);
-        try
-        {
-            if (survivors.Count > 0)
-            {
-                throw new InvalidOperationException(
-                    $"{displayName} is still running in the background after several automatic close attempts. " +
-                    "End that Discord client from Task Manager, then try again.");
-            }
-        }
-        finally
-        {
-            foreach (var process in survivors) process.Dispose();
-        }
-
-        if (restartTargetAdded || waitingReported)
-            progress?.Report(new OperationProgress($"{displayName} closed."));
-        return restartTargets;
     }
 
-    private static async Task TryStopProcessAsync(Process process, CancellationToken cancellationToken)
+    private static async Task TryStopProcessAsync(
+        Process process,
+        DateTime closeDeadline,
+        CancellationToken cancellationToken)
     {
         try
         {
+            if (DateTime.UtcNow >= closeDeadline) return;
+
             process.Refresh();
             if (process.HasExited) return;
             process.Kill(entireProcessTree: true);
-            await process.WaitForExitAsync(cancellationToken).WaitAsync(PerProcessExitWait, cancellationToken);
+
+            var remaining = closeDeadline - DateTime.UtcNow;
+            if (remaining <= TimeSpan.Zero) return;
+
+            var exitWait = remaining < PerProcessExitWait ? remaining : PerProcessExitWait;
+            await process.WaitForExitAsync(cancellationToken).WaitAsync(exitWait, cancellationToken);
         }
         catch (InvalidOperationException)
         {
@@ -137,17 +150,31 @@ public sealed class DiscordService
         }
     }
 
-    private static List<Process> GetLiveProcesses(string processName)
+    private static ProcessSnapshot GetProcessSnapshot(string processName)
     {
-        var live = new List<Process>();
-        foreach (var process in Process.GetProcessesByName(processName))
+        Process[] discovered;
+        try
+        {
+            discovered = Process.GetProcessesByName(processName);
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            // Failure to enumerate is unknown, never proof that the selected client is closed.
+            return new ProcessSnapshot([], 0, QueryUncertain: true);
+        }
+
+        var potentiallyRunning = new List<Process>();
+        var confirmedLiveCount = 0;
+        var queryUncertain = false;
+        foreach (var process in discovered)
         {
             try
             {
                 process.Refresh();
                 if (!process.HasExited)
                 {
-                    live.Add(process);
+                    potentiallyRunning.Add(process);
+                    confirmedLiveCount++;
                     continue;
                 }
             }
@@ -158,16 +185,25 @@ public sealed class DiscordService
             catch (System.ComponentModel.Win32Exception)
             {
                 // A query failure is not proof that the process exited. Keep it in the live
-                // set so the retry loop stays fail-closed and only reports success after a
-                // later clean snapshot confirms the selected client is gone.
-                live.Add(process);
+                // set so the retry loop stays fail-closed, but do not count it as confirmed
+                // running or use it as evidence that this manager should restart Discord.
+                potentiallyRunning.Add(process);
+                queryUncertain = true;
                 continue;
             }
 
             process.Dispose();
         }
 
-        return live;
+        return new ProcessSnapshot(potentiallyRunning, confirmedLiveCount, queryUncertain);
+    }
+
+    private sealed record ProcessSnapshot(
+        List<Process> Processes,
+        int ConfirmedLiveCount,
+        bool QueryUncertain)
+    {
+        public bool IsClear => Processes.Count == 0 && !QueryUncertain;
     }
 
     public void Restart(IEnumerable<DiscordRestartTarget> targets)
