@@ -28,7 +28,7 @@ Once the manager is installed, future releases are discovered through `update-ma
 ## Current release
 
 - Distribution: **v1.0.0**
-- Custom Vencord Manager: **v0.1.1**
+- Custom Vencord Manager: **v0.1.2**
 - Vencord base: **1.15.4** (`0e40e433`)
 - OrionQuests: **v4.10.12**
 - Runtime custom-plugin loader: included

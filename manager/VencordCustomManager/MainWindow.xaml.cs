@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 
@@ -11,7 +12,10 @@ public partial class MainWindow : Window
     private UpdateManifest? _manifest;
     private ManagerState _state = new();
     private DiscordInstallProbe? _localProbe;
+    private readonly Dictionary<string, DiscordInstallProbe> _clientProbes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<ScrollViewer, SmoothScrollState> _smoothScrollStates = new();
     private bool _busy;
+    private bool _smoothScrollRenderingSubscribed;
     private string _lastProgressMessage = string.Empty;
     private TaskCompletionSource<bool>? _dialogCompletion;
 
@@ -27,14 +31,21 @@ public partial class MainWindow : Window
     private static readonly SolidColorBrush DangerBrush = Brush(0xF0, 0x7B, 0x87);
     private static readonly SolidColorBrush DangerSoftBrush = Brush(0x32, 0x1B, 0x21);
     private static readonly SolidColorBrush DangerBorderBrush = Brush(0x5A, 0x29, 0x33);
+    private static readonly SolidColorBrush NeutralBrush = Brush(0x92, 0x9C, 0xAB);
+    private static readonly SolidColorBrush NeutralSoftBrush = Brush(0x15, 0x1B, 0x24);
+    private static readonly SolidColorBrush NeutralBorderBrush = Brush(0x25, 0x2D, 0x3A);
+
+    private const double WheelScrollMultiplier = 0.72;
+    private static readonly TimeSpan SmoothScrollDuration = TimeSpan.FromMilliseconds(175);
 
     public MainWindow()
     {
         InitializeComponent();
         _state = _installationService.LoadState();
         ApplySavedBranch();
-        _localProbe = _installationService.ProbeLocalInstallation(SelectedBranch());
         _state = _installationService.RecoverStateFromLocalInstallation(SelectedBranch());
+        RefreshClientProbes();
+        _localProbe = ResolveSelectedProbe();
         RefreshUi();
     }
 
@@ -48,6 +59,11 @@ public partial class MainWindow : Window
     private void Window_Closed(object? sender, EventArgs e)
     {
         _dialogCompletion?.TrySetResult(false);
+        if (_smoothScrollRenderingSubscribed)
+        {
+            CompositionTarget.Rendering -= SmoothScroll_Rendering;
+            _smoothScrollRenderingSubscribed = false;
+        }
         _installationService.Dispose();
     }
 
@@ -102,11 +118,16 @@ public partial class MainWindow : Window
         if (_manifest is null) return;
 
         VerifyLocalInstallation(logResult: false);
-        var installed = _installationService.IsInstalled(_state);
+        var installed = HasManagedInstallationDetected()
+            && !string.IsNullOrWhiteSpace(_state.InstalledVersion);
         var action = installed ? "Update" : "Install";
+        var selectedClient = SelectedClientDisplayName();
+        var replacingOtherVencord = _localProbe?.IsPatched == true && _localProbe.IsManagedPatch == false;
         var prompt = installed
-            ? $"This will update Custom Vencord from v{_state.InstalledVersion} to v{_manifest.Version}. Discord will close briefly, the current build will be backed up, and Discord will reopen when the update finishes."
-            : $"This will install Custom Vencord v{_manifest.Version} into the manager-owned app folder and inject it into the selected Discord channel. Discord will close briefly if it is running.";
+            ? $"This will update the shared Custom Vencord build from v{_state.InstalledVersion} to v{_manifest.Version} and verify {selectedClient}. Any other Discord channels already using this managed build will continue using the same updated files."
+            : replacingOtherVencord
+                ? $"{selectedClient} currently has a different Vencord injection. Installing Custom Vencord v{_manifest.Version} will replace that injection for this client while leaving the other Discord channels alone."
+                : $"This will install Custom Vencord v{_manifest.Version} for {selectedClient}. If the latest managed build is already present for another Discord channel, the manager will reuse it instead of downloading it again.";
 
         if (!await ShowDialogAsync(
                 $"{action} Custom Vencord?",
@@ -220,10 +241,11 @@ public partial class MainWindow : Window
         {
             _manifest = await _installationService.GetManifestAsync();
             _state = _installationService.RecoverStateFromLocalInstallation(SelectedBranch(), _manifest);
-            _localProbe = _installationService.ProbeLocalInstallation(SelectedBranch());
+            RefreshClientProbes();
+            _localProbe = ResolveSelectedProbe();
             AppendLog($"Latest distribution: v{_manifest.Version} (OrionQuests v{_manifest.Components.OrionQuests}).");
-            if (_installationService.IsInstalled(_state))
-                AppendLog($"Local installation verified as Custom Vencord v{_state.InstalledVersion}.");
+            if (HasManagedInstallationDetected() && !string.IsNullOrWhiteSpace(_state.InstalledVersion))
+                AppendLog($"{SelectedClientDisplayName()} verified as Custom Vencord v{_state.InstalledVersion}.");
             RefreshUi();
             ProgressText.Text = "Update check complete";
 
@@ -303,7 +325,8 @@ public partial class MainWindow : Window
         {
             await action(progress);
             _state = _installationService.RecoverStateFromLocalInstallation(SelectedBranch(), _manifest);
-            _localProbe = _installationService.ProbeLocalInstallation(SelectedBranch());
+            RefreshClientProbes();
+            _localProbe = ResolveSelectedProbe();
             OperationProgressBar.IsIndeterminate = false;
             OperationProgressBar.Value = 100;
             RefreshUi();
@@ -341,10 +364,16 @@ public partial class MainWindow : Window
     private void RefreshUi()
     {
         _state = _installationService.LoadState();
-        _localProbe = _installationService.ProbeLocalInstallation(SelectedBranch());
-        var installed = _installationService.IsInstalled(_state);
+        RefreshClientProbes();
+        _localProbe = ResolveSelectedProbe();
+        var selectedDiscordFound = _localProbe is not null;
         var managedDetected = HasManagedInstallationDetected();
+        var installed = managedDetected && !string.IsNullOrWhiteSpace(_state.InstalledVersion);
         var otherVencordDetected = _localProbe?.IsPatched == true && _localProbe.IsManagedPatch == false;
+
+        SelectedChannelText.Text = SelectedChannelLabel();
+        RefreshClientStatusIndicators();
+
         InstalledVersionText.Text = installed
             ? $"v{_state.InstalledVersion}"
             : managedDetected
@@ -357,18 +386,20 @@ public partial class MainWindow : Window
         DialogTone statusTone;
         if (_manifest is null)
         {
-            StatusText.Text = installed
-                ? "Installed · locally verified"
-                : managedDetected
-                    ? "Custom Vencord detected · checking version"
-                    : otherVencordDetected
-                        ? "Existing Vencord detected"
-                        : "Not installed";
+            StatusText.Text = !selectedDiscordFound
+                ? $"{SelectedClientDisplayName()} not found"
+                : installed
+                    ? "Installed · locally verified"
+                    : managedDetected
+                        ? "Custom Vencord detected · checking version"
+                        : otherVencordDetected
+                            ? "Existing Vencord detected"
+                            : "Custom Vencord not installed";
             VencordVersionText.Text = "—";
             OrionVersionText.Text = "—";
             NitroVersionText.Text = "—";
             LoaderStatusText.Text = "—";
-            statusTone = DialogTone.Accent;
+            statusTone = selectedDiscordFound ? DialogTone.Accent : DialogTone.Warning;
         }
         else
         {
@@ -377,7 +408,12 @@ public partial class MainWindow : Window
             NitroVersionText.Text = _manifest.Components.NitroSniper;
             LoaderStatusText.Text = _manifest.Components.RuntimePluginLoader ? "Included" : "Not included";
 
-            if (!installed)
+            if (!selectedDiscordFound)
+            {
+                StatusText.Text = $"{SelectedClientDisplayName()} not found";
+                statusTone = DialogTone.Warning;
+            }
+            else if (!installed)
             {
                 if (managedDetected)
                 {
@@ -419,13 +455,18 @@ public partial class MainWindow : Window
         SetStatusVisual(statusTone);
 
         var updateAvailable = _manifest is not null
+            && selectedDiscordFound
             && (!installed || UpdateClient.CompareVersions(_state.InstalledVersion, _manifest.Version) < 0);
 
-        PrimaryButton.Content = !installed
-            ? "Install latest  →"
-            : updateAvailable
-                ? $"Update to v{_manifest!.Version}  →"
-                : "You're up to date";
+        PrimaryButton.Content = !selectedDiscordFound
+            ? "Discord client not found"
+            : !installed
+                ? otherVencordDetected
+                    ? "Install Custom Vencord  →"
+                    : "Install latest  →"
+                : updateAvailable
+                    ? $"Update to v{_manifest!.Version}  →"
+                    : "You're up to date";
 
         PrimaryButton.IsEnabled = !_busy && _manifest is not null && updateAvailable;
         ManagerVersionText.Text = $"v{AppInfo.CurrentVersion}";
@@ -439,14 +480,15 @@ public partial class MainWindow : Window
         RepairButton.IsEnabled = !_busy && managedDetected && _manifest is not null;
         UninstallButton.IsEnabled = !_busy && managedDetected;
         OpenPluginsButton.IsEnabled = !_busy;
-        OpenInstallButton.IsEnabled = !_busy;
+        OpenInstallButton.IsEnabled = !_busy && _installationService.HasManagedFiles();
         SetBranchControlsEnabled(!_busy);
     }
 
     private void VerifyLocalInstallation(bool logResult)
     {
-        _localProbe = _installationService.ProbeLocalInstallation(SelectedBranch());
         _state = _installationService.RecoverStateFromLocalInstallation(SelectedBranch(), _manifest);
+        RefreshClientProbes();
+        _localProbe = ResolveSelectedProbe();
 
         if (!logResult) return;
         if (_localProbe is null)
@@ -473,6 +515,93 @@ public partial class MainWindow : Window
     private bool HasManagedInstallationDetected() =>
         _localProbe?.IsManagedPatch == true && _installationService.HasManagedFiles();
 
+    private void RefreshClientProbes()
+    {
+        _clientProbes.Clear();
+        foreach (var probe in _installationService.ProbeAllLocalInstallations())
+            _clientProbes[probe.Branch] = probe;
+    }
+
+    private DiscordInstallProbe? ResolveSelectedProbe()
+    {
+        var selected = SelectedBranch();
+        if (!selected.Equals("auto", StringComparison.OrdinalIgnoreCase))
+            return _clientProbes.TryGetValue(selected, out var exact) ? exact : null;
+
+        foreach (var branch in new[] { "stable", "canary", "ptb" })
+        {
+            if (_clientProbes.TryGetValue(branch, out var probe)) return probe;
+        }
+
+        return null;
+    }
+
+    private void RefreshClientStatusIndicators()
+    {
+        SetClientStatus("stable", StableClientDot, StableClientStatusBadge, StableClientStatusText);
+        SetClientStatus("ptb", PtbClientDot, PtbClientStatusBadge, PtbClientStatusText);
+        SetClientStatus("canary", CanaryClientDot, CanaryClientStatusBadge, CanaryClientStatusText);
+    }
+
+    private void SetClientStatus(string branch, System.Windows.Shapes.Ellipse dot, Border badge, TextBlock text)
+    {
+        if (!_clientProbes.TryGetValue(branch, out var probe))
+        {
+            text.Text = "Discord not found";
+            text.Foreground = NeutralBrush;
+            dot.Fill = NeutralBrush;
+            badge.Background = NeutralSoftBrush;
+            badge.BorderBrush = NeutralBorderBrush;
+            return;
+        }
+
+        if (probe.IsManagedPatch && _installationService.HasManagedFiles())
+        {
+            text.Text = string.IsNullOrWhiteSpace(_state.InstalledVersion)
+                ? "Custom Vencord"
+                : $"Custom v{_state.InstalledVersion}";
+            text.Foreground = SuccessBrush;
+            dot.Fill = SuccessBrush;
+            badge.Background = SuccessSoftBrush;
+            badge.BorderBrush = SuccessBorderBrush;
+            return;
+        }
+
+        if (probe.IsPatched)
+        {
+            text.Text = "Other Vencord";
+            text.Foreground = WarningBrush;
+            dot.Fill = WarningBrush;
+            badge.Background = WarningSoftBrush;
+            badge.BorderBrush = WarningBorderBrush;
+            return;
+        }
+
+        text.Text = "No Custom Vencord";
+        text.Foreground = AccentBrush;
+        dot.Fill = AccentBrush;
+        badge.Background = AccentSoftBrush;
+        badge.BorderBrush = AccentBorderBrush;
+    }
+
+    private string SelectedChannelLabel()
+    {
+        var selected = SelectedBranch();
+        if (!selected.Equals("auto", StringComparison.OrdinalIgnoreCase))
+            return DisplayBranch(selected).Replace("Discord ", string.Empty, StringComparison.Ordinal) + " channel";
+
+        return _localProbe is null
+            ? "Auto · no client found"
+            : $"Auto → {DisplayBranch(_localProbe.Branch).Replace("Discord ", string.Empty, StringComparison.Ordinal)}";
+    }
+
+    private string SelectedClientDisplayName()
+    {
+        var selected = SelectedBranch();
+        if (!selected.Equals("auto", StringComparison.OrdinalIgnoreCase)) return DisplayBranch(selected);
+        return _localProbe is null ? "Discord" : DisplayBranch(_localProbe.Branch);
+    }
+
     private static string DisplayBranch(string branch) => branch.ToLowerInvariant() switch
     {
         "stable" => "Discord Stable",
@@ -480,6 +609,30 @@ public partial class MainWindow : Window
         "canary" => "Discord Canary",
         _ => "Discord"
     };
+
+    private void BranchRadio_Checked(object sender, RoutedEventArgs e)
+    {
+        // XAML sets Auto during InitializeComponent. Wait until the window is live before
+        // probing or touching the rest of the visual tree.
+        if (!IsLoaded || _busy) return;
+
+        var selected = SelectedBranch();
+        _installationService.SavePreferredBranch(selected);
+        _state = _installationService.RecoverStateFromLocalInstallation(selected, _manifest);
+        RefreshClientProbes();
+        _localProbe = ResolveSelectedProbe();
+        RefreshUi();
+
+        var status = _localProbe is null
+            ? "Discord client not found"
+            : _localProbe.IsManagedPatch
+                ? "Custom Vencord installed"
+                : _localProbe.IsPatched
+                    ? "another Vencord installation detected"
+                    : "Custom Vencord not installed";
+        ProgressText.Text = $"Viewing {SelectedClientDisplayName()}";
+        AppendLog($"Client selection: {SelectedChannelLabel()} · {status}.");
+    }
 
     private void SetStatusVisual(DialogTone tone)
     {
@@ -535,6 +688,73 @@ public partial class MainWindow : Window
         BranchCanary.IsEnabled = enabled;
     }
 
+    private void SmoothScrollViewer_MouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        if (sender is not ScrollViewer scrollViewer || scrollViewer.ScrollableHeight <= 0) return;
+
+        if (!_smoothScrollStates.TryGetValue(scrollViewer, out var state))
+        {
+            state = new SmoothScrollState();
+            _smoothScrollStates[scrollViewer] = state;
+        }
+
+        var currentTarget = state.Active ? state.TargetOffset : scrollViewer.VerticalOffset;
+        var target = Math.Clamp(
+            currentTarget - (e.Delta * WheelScrollMultiplier),
+            0,
+            scrollViewer.ScrollableHeight);
+
+        if (Math.Abs(target - scrollViewer.VerticalOffset) < 0.5) return;
+
+        state.StartOffset = scrollViewer.VerticalOffset;
+        state.TargetOffset = target;
+        state.StartedAtUtc = DateTime.UtcNow;
+        state.Active = true;
+
+        if (!_smoothScrollRenderingSubscribed)
+        {
+            CompositionTarget.Rendering += SmoothScroll_Rendering;
+            _smoothScrollRenderingSubscribed = true;
+        }
+
+        e.Handled = true;
+    }
+
+    private void SmoothScroll_Rendering(object? sender, EventArgs e)
+    {
+        var now = DateTime.UtcNow;
+        var anyActive = false;
+
+        foreach (var pair in _smoothScrollStates)
+        {
+            var scrollViewer = pair.Key;
+            var state = pair.Value;
+            if (!state.Active) continue;
+
+            var elapsed = now - state.StartedAtUtc;
+            var t = Math.Clamp(elapsed.TotalMilliseconds / SmoothScrollDuration.TotalMilliseconds, 0d, 1d);
+            var eased = 1d - Math.Pow(1d - t, 3d);
+            var destination = state.StartOffset + ((state.TargetOffset - state.StartOffset) * eased);
+            scrollViewer.ScrollToVerticalOffset(destination);
+
+            if (t >= 1d)
+            {
+                state.Active = false;
+                scrollViewer.ScrollToVerticalOffset(state.TargetOffset);
+            }
+            else
+            {
+                anyActive = true;
+            }
+        }
+
+        if (!anyActive && _smoothScrollRenderingSubscribed)
+        {
+            CompositionTarget.Rendering -= SmoothScroll_Rendering;
+            _smoothScrollRenderingSubscribed = false;
+        }
+    }
+
     private void AppendLog(string message)
     {
         Dispatcher.Invoke(() =>
@@ -543,6 +763,14 @@ public partial class MainWindow : Window
             ActivityLogText.Text += (ActivityLogText.Text.Length == 0 ? string.Empty : Environment.NewLine) + line;
             ActivityScrollViewer.ScrollToEnd();
         });
+    }
+
+    private sealed class SmoothScrollState
+    {
+        public double StartOffset { get; set; }
+        public double TargetOffset { get; set; }
+        public DateTime StartedAtUtc { get; set; }
+        public bool Active { get; set; }
     }
 
     private Task<bool> ShowDialogAsync(

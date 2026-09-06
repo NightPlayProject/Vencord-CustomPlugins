@@ -287,7 +287,7 @@
                             Background="#171C25"
                             BorderBrush="#252C38"
                             BorderThickness="1">
-                        <TextBlock x:Name="ManagerVersionText" FontSize="10.5" Foreground="{StaticResource TextMutedBrush}" Text="v0.1.0" />
+                        <TextBlock x:Name="ManagerVersionText" FontSize="10.5" Foreground="{StaticResource TextMutedBrush}" Text="v0.1.2" />
                     </Border>
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="0,6,7,6">
@@ -306,7 +306,13 @@
                     </RadialGradientBrush>
                 </Grid.Background>
 
-                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <ScrollViewer x:Name="MainScrollViewer"
+                              VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Disabled"
+                              PanningMode="VerticalOnly"
+                              PanningDeceleration="0.0015"
+                              PanningRatio="1"
+                              MouseWheel="SmoothScrollViewer_MouseWheel">
                     <Grid Margin="34,28,34,30">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
@@ -367,11 +373,12 @@
                                                 <TextBlock x:Name="StatusText" FontSize="11.5" FontWeight="SemiBold" Text="Checking for updates…" />
                                             </StackPanel>
                                         </Border>
-                                        <TextBlock Margin="12,0,0,0"
+                                        <TextBlock x:Name="SelectedChannelText"
+                                                   Margin="12,0,0,0"
                                                    VerticalAlignment="Center"
                                                    Foreground="{StaticResource TextSubtleBrush}"
                                                    FontSize="11.5"
-                                                   Text="Stable channel" />
+                                                   Text="Auto channel" />
                                     </StackPanel>
 
                                     <Grid Margin="0,18,0,0">
@@ -473,12 +480,45 @@
 
                                     <Border Margin="0,14,0,0" Padding="3" CornerRadius="8" Background="#0D1118" BorderBrush="#222A36" BorderThickness="1">
                                         <UniformGrid Columns="4">
-                                            <RadioButton x:Name="BranchAuto" GroupName="DiscordBranch" Tag="auto" IsChecked="True" Style="{StaticResource SegmentRadio}" Content="Auto" />
-                                            <RadioButton x:Name="BranchStable" GroupName="DiscordBranch" Tag="stable" Style="{StaticResource SegmentRadio}" Content="Stable" />
-                                            <RadioButton x:Name="BranchPtb" GroupName="DiscordBranch" Tag="ptb" Style="{StaticResource SegmentRadio}" Content="PTB" />
-                                            <RadioButton x:Name="BranchCanary" GroupName="DiscordBranch" Tag="canary" Style="{StaticResource SegmentRadio}" Content="Canary" />
+                                            <RadioButton x:Name="BranchAuto" GroupName="DiscordBranch" Tag="auto" IsChecked="True" Style="{StaticResource SegmentRadio}" Content="Auto" Checked="BranchRadio_Checked" />
+                                            <RadioButton x:Name="BranchStable" GroupName="DiscordBranch" Tag="stable" Style="{StaticResource SegmentRadio}" Content="Stable" Checked="BranchRadio_Checked" />
+                                            <RadioButton x:Name="BranchPtb" GroupName="DiscordBranch" Tag="ptb" Style="{StaticResource SegmentRadio}" Content="PTB" Checked="BranchRadio_Checked" />
+                                            <RadioButton x:Name="BranchCanary" GroupName="DiscordBranch" Tag="canary" Style="{StaticResource SegmentRadio}" Content="Canary" Checked="BranchRadio_Checked" />
                                         </UniformGrid>
                                     </Border>
+
+                                    <Grid Margin="0,12,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="7" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="7" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+
+                                        <Ellipse Grid.Row="0" x:Name="StableClientDot" Width="6" Height="6" Margin="0,0,8,0" VerticalAlignment="Center" Fill="{StaticResource TextSubtleBrush}" />
+                                        <TextBlock Grid.Row="0" Grid.Column="1" FontSize="11.5" Foreground="{StaticResource TextMutedBrush}" Text="Discord Stable" />
+                                        <Border Grid.Row="0" Grid.Column="2" x:Name="StableClientStatusBadge" Padding="7,3" CornerRadius="6" Background="#151B24" BorderBrush="#252D3A" BorderThickness="1">
+                                            <TextBlock x:Name="StableClientStatusText" FontSize="10.5" Foreground="{StaticResource TextMutedBrush}" Text="Checking…" />
+                                        </Border>
+
+                                        <Ellipse Grid.Row="2" x:Name="PtbClientDot" Width="6" Height="6" Margin="0,0,8,0" VerticalAlignment="Center" Fill="{StaticResource TextSubtleBrush}" />
+                                        <TextBlock Grid.Row="2" Grid.Column="1" FontSize="11.5" Foreground="{StaticResource TextMutedBrush}" Text="Discord PTB" />
+                                        <Border Grid.Row="2" Grid.Column="2" x:Name="PtbClientStatusBadge" Padding="7,3" CornerRadius="6" Background="#151B24" BorderBrush="#252D3A" BorderThickness="1">
+                                            <TextBlock x:Name="PtbClientStatusText" FontSize="10.5" Foreground="{StaticResource TextMutedBrush}" Text="Checking…" />
+                                        </Border>
+
+                                        <Ellipse Grid.Row="4" x:Name="CanaryClientDot" Width="6" Height="6" Margin="0,0,8,0" VerticalAlignment="Center" Fill="{StaticResource TextSubtleBrush}" />
+                                        <TextBlock Grid.Row="4" Grid.Column="1" FontSize="11.5" Foreground="{StaticResource TextMutedBrush}" Text="Discord Canary" />
+                                        <Border Grid.Row="4" Grid.Column="2" x:Name="CanaryClientStatusBadge" Padding="7,3" CornerRadius="6" Background="#151B24" BorderBrush="#252D3A" BorderThickness="1">
+                                            <TextBlock x:Name="CanaryClientStatusText" FontSize="10.5" Foreground="{StaticResource TextMutedBrush}" Text="Checking…" />
+                                        </Border>
+                                    </Grid>
 
                                     <Grid Margin="0,14,0,0">
                                         <Grid.ColumnDefinitions>
@@ -532,7 +572,11 @@
                                 <ScrollViewer x:Name="ActivityScrollViewer"
                                               Grid.Row="4"
                                               VerticalScrollBarVisibility="Auto"
-                                              HorizontalScrollBarVisibility="Disabled">
+                                              HorizontalScrollBarVisibility="Disabled"
+                                              PanningMode="VerticalOnly"
+                                              PanningDeceleration="0.0015"
+                                              PanningRatio="1"
+                                              MouseWheel="SmoothScrollViewer_MouseWheel">
                                     <TextBlock x:Name="ActivityLogText"
                                                TextWrapping="Wrap"
                                                Foreground="#9FAABA"

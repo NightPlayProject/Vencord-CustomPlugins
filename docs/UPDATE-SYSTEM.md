@@ -27,3 +27,13 @@ The release version, URLs and hashes must be updated together for every publicat
 The manifest can also contain a top-level `manager` object with its own version, download URL and SHA-256. When that version is newer than the running manager, the UI offers a manager update. The replacement executable is downloaded and verified first, then a short-lived helper replaces the manager after the current process exits and starts the new build.
 
 The manager executable itself is published as a GitHub Release asset; it is not committed to the repository.
+
+## Multiple Discord clients
+
+Discord Stable, PTB, and Canary are probed independently. The managed Vencord payload under `%LOCALAPPDATA%\NightPlayProject\VencordCustomPlugins\current` is shared, while each Discord client's `app.asar` injection is treated as separate state.
+
+- A client can be manager-owned, patched by another Vencord install, unpatched, or not installed.
+- Adding an already-current managed build to another Discord client only creates/verifies that client's injection; it does not redownload the release.
+- Updating the shared managed payload re-verifies every Discord client that was already pointing at it.
+- Uninstalling from one Discord client keeps the shared payload if another client still points at it.
+- The UI refreshes all three client statuses after selection changes and after install/update/repair/uninstall operations.

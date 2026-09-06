@@ -37,9 +37,15 @@ public sealed class InstallationService : IDisposable
     public bool IsInstalled(ManagerState? state = null)
     {
         state ??= LoadState();
+        return IsInstalled(state.DiscordBranch, state);
+    }
+
+    public bool IsInstalled(string branch, ManagerState? state = null)
+    {
+        state ??= LoadState();
         return !string.IsNullOrWhiteSpace(state.InstalledVersion)
             && HasManagedFiles()
-            && _patchService.Probe(state.DiscordBranch)?.IsManagedPatch == true;
+            && _patchService.Probe(branch)?.IsManagedPatch == true;
     }
 
     public bool HasManagedFiles() =>
@@ -55,6 +61,8 @@ public sealed class InstallationService : IDisposable
     {
         var state = LoadState();
         var probe = _patchService.Probe(branch);
+        if (probe?.IsManagedPatch != true)
+            probe = _patchService.ProbeAll().FirstOrDefault(x => x.IsManagedPatch);
         if (probe?.IsManagedPatch != true || !HasManagedFiles()) return state;
 
         var metadata = LoadInstallMetadata();
@@ -70,7 +78,6 @@ public sealed class InstallationService : IDisposable
         state.InstalledVersion = version;
         state.InstalledAt ??= metadata?.PreparedAt ?? now;
         state.LastVerifiedAt = now;
-        state.DiscordBranch = probe.Branch;
         SaveState(state);
         WriteInstallMetadata(new ManagedInstallMetadata
         {
@@ -80,6 +87,13 @@ public sealed class InstallationService : IDisposable
             VerifiedAt = now
         });
         return state;
+    }
+
+    public void SavePreferredBranch(string branch)
+    {
+        var state = LoadState();
+        state.DiscordBranch = NormalizeBranchPreference(branch);
+        SaveState(state);
     }
 
     public async Task InstallOrUpdateAsync(
@@ -93,6 +107,11 @@ public sealed class InstallationService : IDisposable
         var oldState = LoadState();
         progress?.Report(new OperationProgress("Checking the existing Discord installation…"));
         var previousProbe = _patchService.Probe(branch);
+        var previouslyManagedBranches = _patchService.ProbeAll()
+            .Where(x => x.IsManagedPatch)
+            .Select(x => x.Branch)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
         if (previousProbe is not null)
         {
             var previousStatus = previousProbe.IsManagedPatch
@@ -101,6 +120,40 @@ public sealed class InstallationService : IDisposable
                     ? "another Vencord injection found"
                     : "Discord found with no Vencord injection";
             progress?.Report(new OperationProgress($"{DisplayBranch(previousProbe.Branch)}: {previousStatus}."));
+        }
+
+        var payloadAlreadyCurrent = HasManagedFiles()
+            && !string.IsNullOrWhiteSpace(oldState.InstalledVersion)
+            && UpdateClient.CompareVersions(oldState.InstalledVersion, manifest.Version) == 0;
+
+        // If another Discord channel already uses the current managed payload, adding this
+        // channel only requires an injection. Avoid redownloading/replacing the shared build.
+        if (!repair && previousProbe?.IsManagedPatch != true && payloadAlreadyCurrent)
+        {
+            IReadOnlyList<DiscordRestartTarget> attachRestartTargets = Array.Empty<DiscordRestartTarget>();
+            try
+            {
+                progress?.Report(new OperationProgress("Current managed build is already verified locally; attaching it to the selected Discord client…"));
+                attachRestartTargets = await _discordService.StopRunningAsync(progress, cancellationToken);
+                var verifiedProbe = _patchService.EnsureManagedPatch(branch, progress);
+                var now = DateTimeOffset.UtcNow;
+                oldState.LastVerifiedAt = now;
+                oldState.DiscordBranch = NormalizeBranchPreference(branch);
+                SaveState(oldState);
+                WriteInstallMetadata(new ManagedInstallMetadata
+                {
+                    DistributionVersion = oldState.InstalledVersion,
+                    DiscordBranch = verifiedProbe.Branch,
+                    PreparedAt = oldState.InstalledAt ?? now,
+                    VerifiedAt = now
+                });
+                progress?.Report(new OperationProgress($"Installation verified · {DisplayBranch(verifiedProbe.Branch)} now uses Custom Vencord v{oldState.InstalledVersion}.", 100));
+                return;
+            }
+            finally
+            {
+                _discordService.Restart(attachRestartTargets);
+            }
         }
 
         var hadManagedDirectory = Directory.Exists(ManagerPaths.InstallDirectory);
@@ -148,6 +201,18 @@ public sealed class InstallationService : IDisposable
             cancellationToken.ThrowIfCancellationRequested();
             var verifiedProbe = _patchService.EnsureManagedPatch(branch, progress);
 
+            var branchesToVerify = previouslyManagedBranches
+                .Append(verifiedProbe.Branch)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (branchesToVerify.Length > 1)
+                progress?.Report(new OperationProgress("Verifying every Discord client that uses the shared managed build…"));
+            foreach (var managedBranch in branchesToVerify)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                _patchService.VerifyManagedPatch(managedBranch, progress);
+            }
+
             var now = DateTimeOffset.UtcNow;
             var newState = new ManagerState
             {
@@ -155,7 +220,7 @@ public sealed class InstallationService : IDisposable
                 InstalledAt = oldState.InstalledAt ?? now,
                 LastUpdatedAt = now,
                 LastVerifiedAt = now,
-                DiscordBranch = verifiedProbe.Branch,
+                DiscordBranch = NormalizeBranchPreference(branch),
                 LastBackupPath = backupPath ?? oldState.LastBackupPath
             };
             SaveState(newState);
@@ -204,7 +269,7 @@ public sealed class InstallationService : IDisposable
         var state = LoadState();
         var probe = _patchService.Probe(branch);
         var hasManagedPatch = probe?.IsManagedPatch == true;
-        if (!hasManagedPatch && !HasManagedFiles()) return;
+        if (!hasManagedPatch) return;
 
         IReadOnlyList<DiscordRestartTarget> restartTargets = Array.Empty<DiscordRestartTarget>();
         try
@@ -213,14 +278,24 @@ public sealed class InstallationService : IDisposable
             if (hasManagedPatch)
                 _patchService.UnpatchManaged(probe!.Branch, progress);
 
-            progress?.Report(new OperationProgress("Removing managed Vencord files…"));
-            SafeDeleteDirectory(ManagerPaths.InstallDirectory);
-            state.InstalledVersion = string.Empty;
+            var remainingManagedClients = _patchService.ProbeAll().Where(x => x.IsManagedPatch).ToArray();
+            if (remainingManagedClients.Length == 0)
+            {
+                progress?.Report(new OperationProgress("No other Discord clients use this build; removing managed Vencord files…"));
+                SafeDeleteDirectory(ManagerPaths.InstallDirectory);
+                state.InstalledVersion = string.Empty;
+                TryDeleteFile(ManagerPaths.InstallMetadataFile);
+            }
+            else
+            {
+                var remaining = string.Join(", ", remainingManagedClients.Select(x => DisplayBranch(x.Branch)));
+                progress?.Report(new OperationProgress($"Keeping the shared managed build because it is still used by {remaining}."));
+            }
             state.LastUpdatedAt = DateTimeOffset.UtcNow;
             state.LastVerifiedAt = DateTimeOffset.UtcNow;
-            state.DiscordBranch = probe?.Branch ?? branch;
+            state.DiscordBranch = NormalizeBranchPreference(branch);
             SaveState(state);
-            progress?.Report(new OperationProgress("Uninstall verified · complete.", 100));
+            progress?.Report(new OperationProgress($"Uninstall verified · {DisplayBranch(probe!.Branch)} is clean.", 100));
         }
         finally
         {
@@ -342,6 +417,14 @@ public sealed class InstallationService : IDisposable
         _ => "Discord"
     };
 
+    private static string NormalizeBranchPreference(string branch) => branch.ToLowerInvariant() switch
+    {
+        "stable" => "stable",
+        "ptb" => "ptb",
+        "canary" => "canary",
+        _ => "auto"
+    };
+
     private static string CreateBackupPath(string version)
     {
         var safeVersion = string.IsNullOrWhiteSpace(version) ? "unknown" : version.Replace(Path.DirectorySeparatorChar, '-');
@@ -383,6 +466,15 @@ public sealed class InstallationService : IDisposable
         if (!Directory.Exists(path)) return;
         ManagerPaths.EnsureManagedPath(path);
         Directory.Delete(path, recursive: true);
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+        }
+        catch { }
     }
 
     private static void SaveState(ManagerState state)

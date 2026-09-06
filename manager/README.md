@@ -14,6 +14,11 @@
 - keeps rollback backups during updates
 - injects/repairs/uninstalls using the same small `app.asar` patch method used by the Vencord installer
 - verifies the Discord injection target again before reporting success
+- detects Discord Stable, PTB, and Canary independently and shows a live status for each client
+- reuses an already-current managed build when adding Custom Vencord to another Discord channel
+- keeps the shared managed build when one Discord channel is uninstalled but another still uses it
+- re-verifies every Discord channel using the shared build after a build update
+- uses eased wheel scrolling for the dashboard and activity log
 - preserves `%APPDATA%\Vencord\plugins`
 - supports self-updates through the optional `manager` section of the manifest
 
