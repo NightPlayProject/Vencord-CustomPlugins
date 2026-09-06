@@ -10,3 +10,12 @@ Initial public distribution release.
 - Manager downloads are SHA-256 verified and distribution updates keep rollback backups.
 - Manager UI uses a custom desktop shell, segmented Discord-channel controls and in-app confirmation/error dialogs instead of stock Windows dialogs.
 - Added manager self-update metadata so future manager builds can replace themselves from GitHub Releases.
+
+## Manager v0.1.1
+
+- Verifies the selected local Discord installation before contacting GitHub.
+- Detects and recovers manager-owned Custom Vencord installs even when `manager-state.json` was never written.
+- Replaces the hanging external Vencord Installer CLI step with the same small `app.asar` injection format used by Vencord itself.
+- Verifies the Discord patch target after install/update/repair before showing success.
+- Adds explicit **Installation verified**, **Repair verified**, and **Uninstall verified** completion dialogs.
+- Writes local install metadata so interrupted installs can be recovered more reliably on the next launch.

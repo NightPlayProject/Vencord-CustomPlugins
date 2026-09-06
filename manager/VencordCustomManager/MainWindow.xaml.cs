@@ -10,6 +10,7 @@ public partial class MainWindow : Window
     private readonly InstallationService _installationService = new();
     private UpdateManifest? _manifest;
     private ManagerState _state = new();
+    private DiscordInstallProbe? _localProbe;
     private bool _busy;
     private string _lastProgressMessage = string.Empty;
     private TaskCompletionSource<bool>? _dialogCompletion;
@@ -32,6 +33,8 @@ public partial class MainWindow : Window
         InitializeComponent();
         _state = _installationService.LoadState();
         ApplySavedBranch();
+        _localProbe = _installationService.ProbeLocalInstallation(SelectedBranch());
+        _state = _installationService.RecoverStateFromLocalInstallation(SelectedBranch());
         RefreshUi();
     }
 
@@ -98,6 +101,7 @@ public partial class MainWindow : Window
         if (_manifest is null && !await CheckForUpdatesAsync(false)) return;
         if (_manifest is null) return;
 
+        VerifyLocalInstallation(logResult: false);
         var installed = _installationService.IsInstalled(_state);
         var action = installed ? "Update" : "Install";
         var prompt = installed
@@ -114,12 +118,15 @@ public partial class MainWindow : Window
 
         await RunOperationAsync(
             $"Starting {action.ToLowerInvariant()}…",
-            progress => _installationService.InstallOrUpdateAsync(_manifest, SelectedBranch(), repair: false, progress));
+            progress => _installationService.InstallOrUpdateAsync(_manifest, SelectedBranch(), repair: false, progress),
+            completionTitle: $"{action} verified",
+            completionMessage: $"Custom Vencord v{_manifest.Version} is installed and the Discord injection was verified successfully.");
     }
 
     private async void RepairButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_busy || !_installationService.IsInstalled(_state)) return;
+        VerifyLocalInstallation(logResult: false);
+        if (_busy || !HasManagedInstallationDetected()) return;
         if (_manifest is null && !await CheckForUpdatesAsync(false)) return;
         if (_manifest is null) return;
 
@@ -133,12 +140,15 @@ public partial class MainWindow : Window
 
         await RunOperationAsync(
             "Starting repair…",
-            progress => _installationService.RepairAsync(_manifest, SelectedBranch(), progress));
+            progress => _installationService.RepairAsync(_manifest, SelectedBranch(), progress),
+            completionTitle: "Repair verified",
+            completionMessage: "The managed files were replaced and the Discord injection was verified successfully.");
     }
 
     private async void UninstallButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_busy || !_installationService.IsInstalled(_state)) return;
+        VerifyLocalInstallation(logResult: false);
+        if (_busy || !HasManagedInstallationDetected()) return;
 
         if (!await ShowDialogAsync(
                 "Uninstall Custom Vencord?",
@@ -150,7 +160,9 @@ public partial class MainWindow : Window
 
         await RunOperationAsync(
             "Starting uninstall…",
-            progress => _installationService.UninstallAsync(SelectedBranch(), progress));
+            progress => _installationService.UninstallAsync(SelectedBranch(), progress),
+            completionTitle: "Uninstall verified",
+            completionMessage: "The managed Custom Vencord injection was removed and the Discord installation was verified clean.");
     }
 
     private void OpenPluginsButton_Click(object sender, RoutedEventArgs e)
@@ -194,6 +206,11 @@ public partial class MainWindow : Window
     private async Task<bool> CheckForUpdatesAsync(bool showSuccessDialog)
     {
         if (_busy) return false;
+
+        AppendLog("Verifying local installation before contacting GitHub…");
+        ProgressText.Text = "Verifying local installation…";
+        VerifyLocalInstallation(logResult: true);
+
         SetBusy(true);
         ProgressText.Text = "Checking GitHub…";
         OperationProgressBar.IsIndeterminate = true;
@@ -202,8 +219,11 @@ public partial class MainWindow : Window
         try
         {
             _manifest = await _installationService.GetManifestAsync();
-            _state = _installationService.LoadState();
+            _state = _installationService.RecoverStateFromLocalInstallation(SelectedBranch(), _manifest);
+            _localProbe = _installationService.ProbeLocalInstallation(SelectedBranch());
             AppendLog($"Latest distribution: v{_manifest.Version} (OrionQuests v{_manifest.Components.OrionQuests}).");
+            if (_installationService.IsInstalled(_state))
+                AppendLog($"Local installation verified as Custom Vencord v{_state.InstalledVersion}.");
             RefreshUi();
             ProgressText.Text = "Update check complete";
 
@@ -249,7 +269,9 @@ public partial class MainWindow : Window
     private async Task RunOperationAsync(
         string initialMessage,
         Func<IProgress<OperationProgress>, Task> action,
-        bool showCompletionDialog = true)
+        bool showCompletionDialog = true,
+        string completionTitle = "Operation verified",
+        string completionMessage = "The operation completed and its result was verified successfully.")
     {
         SetBusy(true);
         OperationProgressBar.IsIndeterminate = false;
@@ -280,7 +302,8 @@ public partial class MainWindow : Window
         try
         {
             await action(progress);
-            _state = _installationService.LoadState();
+            _state = _installationService.RecoverStateFromLocalInstallation(SelectedBranch(), _manifest);
+            _localProbe = _installationService.ProbeLocalInstallation(SelectedBranch());
             OperationProgressBar.IsIndeterminate = false;
             OperationProgressBar.Value = 100;
             RefreshUi();
@@ -288,8 +311,8 @@ public partial class MainWindow : Window
             if (showCompletionDialog)
             {
                 await ShowDialogAsync(
-                    "All done",
-                    "The operation completed successfully.",
+                    completionTitle,
+                    completionMessage,
                     "Done",
                     showCancel: false,
                     DialogTone.Success);
@@ -318,14 +341,29 @@ public partial class MainWindow : Window
     private void RefreshUi()
     {
         _state = _installationService.LoadState();
+        _localProbe = _installationService.ProbeLocalInstallation(SelectedBranch());
         var installed = _installationService.IsInstalled(_state);
-        InstalledVersionText.Text = installed ? $"v{_state.InstalledVersion}" : "None";
+        var managedDetected = HasManagedInstallationDetected();
+        var otherVencordDetected = _localProbe?.IsPatched == true && _localProbe.IsManagedPatch == false;
+        InstalledVersionText.Text = installed
+            ? $"v{_state.InstalledVersion}"
+            : managedDetected
+                ? "Detected"
+                : otherVencordDetected
+                    ? "Vencord"
+                    : "None";
         LatestVersionText.Text = _manifest is null ? "—" : $"v{_manifest.Version}";
 
         DialogTone statusTone;
         if (_manifest is null)
         {
-            StatusText.Text = installed ? "Installed · not checked" : "Not installed";
+            StatusText.Text = installed
+                ? "Installed · locally verified"
+                : managedDetected
+                    ? "Custom Vencord detected · checking version"
+                    : otherVencordDetected
+                        ? "Existing Vencord detected"
+                        : "Not installed";
             VencordVersionText.Text = "—";
             OrionVersionText.Text = "—";
             NitroVersionText.Text = "—";
@@ -341,8 +379,21 @@ public partial class MainWindow : Window
 
             if (!installed)
             {
-                StatusText.Text = $"Ready to install v{_manifest.Version}";
-                statusTone = DialogTone.Accent;
+                if (managedDetected)
+                {
+                    StatusText.Text = $"Local Custom Vencord detected · latest is v{_manifest.Version}";
+                    statusTone = DialogTone.Warning;
+                }
+                else if (otherVencordDetected)
+                {
+                    StatusText.Text = $"Existing Vencord detected · Custom v{_manifest.Version} available";
+                    statusTone = DialogTone.Warning;
+                }
+                else
+                {
+                    StatusText.Text = $"Ready to install v{_manifest.Version}";
+                    statusTone = DialogTone.Accent;
+                }
             }
             else
             {
@@ -385,12 +436,50 @@ public partial class MainWindow : Window
             : "Update manager";
         ManagerUpdateButton.IsEnabled = !_busy && managerUpdateAvailable;
         CheckButton.IsEnabled = !_busy;
-        RepairButton.IsEnabled = !_busy && installed && _manifest is not null;
-        UninstallButton.IsEnabled = !_busy && installed;
+        RepairButton.IsEnabled = !_busy && managedDetected && _manifest is not null;
+        UninstallButton.IsEnabled = !_busy && managedDetected;
         OpenPluginsButton.IsEnabled = !_busy;
         OpenInstallButton.IsEnabled = !_busy;
         SetBranchControlsEnabled(!_busy);
     }
+
+    private void VerifyLocalInstallation(bool logResult)
+    {
+        _localProbe = _installationService.ProbeLocalInstallation(SelectedBranch());
+        _state = _installationService.RecoverStateFromLocalInstallation(SelectedBranch(), _manifest);
+
+        if (!logResult) return;
+        if (_localProbe is null)
+        {
+            AppendLog("Local verification: no Discord installation was found for the selected channel.");
+            return;
+        }
+
+        if (_localProbe.IsManagedPatch)
+        {
+            AppendLog($"Local verification: {DisplayBranch(_localProbe.Branch)} is injected with this manager's Custom Vencord build.");
+            return;
+        }
+
+        if (_localProbe.IsPatched)
+        {
+            AppendLog($"Local verification: {DisplayBranch(_localProbe.Branch)} already has another Vencord installation.");
+            return;
+        }
+
+        AppendLog($"Local verification: {DisplayBranch(_localProbe.Branch)} is installed but has no Vencord injection.");
+    }
+
+    private bool HasManagedInstallationDetected() =>
+        _localProbe?.IsManagedPatch == true && _installationService.HasManagedFiles();
+
+    private static string DisplayBranch(string branch) => branch.ToLowerInvariant() switch
+    {
+        "stable" => "Discord Stable",
+        "ptb" => "Discord PTB",
+        "canary" => "Discord Canary",
+        _ => "Discord"
+    };
 
     private void SetStatusVisual(DialogTone tone)
     {

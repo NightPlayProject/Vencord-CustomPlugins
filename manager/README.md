@@ -7,12 +7,21 @@
 - reads `update-manifest.json` from the public repository
 - downloads the latest release package over HTTPS
 - verifies the package SHA-256 before extraction
+- verifies the selected Discord installation before contacting GitHub
+- detects existing Vencord injections and whether they point to this manager's build
 - installs into `%LOCALAPPDATA%\NightPlayProject\VencordCustomPlugins\current`
 - closes and restarts Discord when required
 - keeps rollback backups during updates
-- repairs or uninstalls through the official Vencord installer CLI
+- injects/repairs/uninstalls using the same small `app.asar` patch method used by the Vencord installer
+- verifies the Discord injection target again before reporting success
 - preserves `%APPDATA%\Vencord\plugins`
 - supports self-updates through the optional `manager` section of the manifest
+
+## Recovery
+
+If Discord was already patched successfully but the manager was interrupted before it could save `manager-state.json`, the next launch detects the local injection first. If it points to the manager-owned `dist\patcher.js`, the manager recovers its state from local metadata or from the installed package after the manifest is loaded.
+
+New installs also write `.manager-install.json` inside the managed install folder before Discord is patched, so future interrupted installs can recover their distribution version without relying only on the external update state.
 
 ## UI
 

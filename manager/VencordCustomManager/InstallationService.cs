@@ -7,13 +7,12 @@ public sealed class InstallationService : IDisposable
 {
     private readonly UpdateClient _updateClient = new();
     private readonly DiscordService _discordService = new();
-    private readonly VencordInstallerService _installerService;
+    private readonly DiscordPatchService _patchService = new();
 
     public SelfUpdateService SelfUpdater { get; }
 
     public InstallationService()
     {
-        _installerService = new VencordInstallerService(_updateClient);
         SelfUpdater = new SelfUpdateService(_updateClient);
         ManagerPaths.EnsureCreated();
     }
@@ -39,8 +38,48 @@ public sealed class InstallationService : IDisposable
     {
         state ??= LoadState();
         return !string.IsNullOrWhiteSpace(state.InstalledVersion)
-            && Directory.Exists(ManagerPaths.InstallDirectory)
-            && File.Exists(Path.Combine(ManagerPaths.InstallDirectory, "dist", "renderer.js"));
+            && HasManagedFiles()
+            && _patchService.Probe(state.DiscordBranch)?.IsManagedPatch == true;
+    }
+
+    public bool HasManagedFiles() =>
+        Directory.Exists(ManagerPaths.InstallDirectory)
+        && File.Exists(Path.Combine(ManagerPaths.InstallDirectory, "dist", "renderer.js"))
+        && File.Exists(Path.Combine(ManagerPaths.InstallDirectory, "dist", "patcher.js"));
+
+    public DiscordInstallProbe? ProbeLocalInstallation(string branch) => _patchService.Probe(branch);
+
+    public IReadOnlyList<DiscordInstallProbe> ProbeAllLocalInstallations() => _patchService.ProbeAll();
+
+    public ManagerState RecoverStateFromLocalInstallation(string branch, UpdateManifest? manifest = null)
+    {
+        var state = LoadState();
+        var probe = _patchService.Probe(branch);
+        if (probe?.IsManagedPatch != true || !HasManagedFiles()) return state;
+
+        var metadata = LoadInstallMetadata();
+        var version = state.InstalledVersion;
+        if (string.IsNullOrWhiteSpace(version))
+            version = metadata?.DistributionVersion ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(version) && manifest is not null && LocalPackageMatchesManifest(manifest))
+            version = manifest.Version;
+
+        if (string.IsNullOrWhiteSpace(version)) return state;
+
+        var now = DateTimeOffset.UtcNow;
+        state.InstalledVersion = version;
+        state.InstalledAt ??= metadata?.PreparedAt ?? now;
+        state.LastVerifiedAt = now;
+        state.DiscordBranch = probe.Branch;
+        SaveState(state);
+        WriteInstallMetadata(new ManagedInstallMetadata
+        {
+            DistributionVersion = version,
+            DiscordBranch = probe.Branch,
+            PreparedAt = state.InstalledAt ?? now,
+            VerifiedAt = now
+        });
+        return state;
     }
 
     public async Task InstallOrUpdateAsync(
@@ -52,7 +91,18 @@ public sealed class InstallationService : IDisposable
     {
         ManagerPaths.EnsureCreated();
         var oldState = LoadState();
-        var hadInstall = IsInstalled(oldState);
+        progress?.Report(new OperationProgress("Checking the existing Discord installation…"));
+        var previousProbe = _patchService.Probe(branch);
+        if (previousProbe is not null)
+        {
+            var previousStatus = previousProbe.IsManagedPatch
+                ? "managed Custom Vencord injection found"
+                : previousProbe.IsPatched
+                    ? "another Vencord injection found"
+                    : "Discord found with no Vencord injection";
+            progress?.Report(new OperationProgress($"{DisplayBranch(previousProbe.Branch)}: {previousStatus}."));
+        }
+
         var hadManagedDirectory = Directory.Exists(ManagerPaths.InstallDirectory);
         var stagingRoot = Path.Combine(ManagerPaths.StagingDirectory, Guid.NewGuid().ToString("N"));
         var extracted = Path.Combine(stagingRoot, "package");
@@ -88,15 +138,15 @@ public sealed class InstallationService : IDisposable
             progress?.Report(new OperationProgress("Installing the new build…"));
             Directory.Move(extracted, ManagerPaths.InstallDirectory);
             CopyExamplePluginIfMissing();
+            WriteInstallMetadata(new ManagedInstallMetadata
+            {
+                DistributionVersion = manifest.Version,
+                DiscordBranch = branch,
+                PreparedAt = DateTimeOffset.UtcNow
+            });
 
-            if (!hadInstall)
-            {
-                await _installerService.RunAsync("install", branch, ManagerPaths.InstallDirectory, progress, cancellationToken);
-            }
-            else if (repair)
-            {
-                await _installerService.RunAsync("repair", branch, ManagerPaths.InstallDirectory, progress, cancellationToken);
-            }
+            cancellationToken.ThrowIfCancellationRequested();
+            var verifiedProbe = _patchService.EnsureManagedPatch(branch, progress);
 
             var now = DateTimeOffset.UtcNow;
             var newState = new ManagerState
@@ -104,18 +154,32 @@ public sealed class InstallationService : IDisposable
                 InstalledVersion = manifest.Version,
                 InstalledAt = oldState.InstalledAt ?? now,
                 LastUpdatedAt = now,
-                DiscordBranch = branch,
+                LastVerifiedAt = now,
+                DiscordBranch = verifiedProbe.Branch,
                 LastBackupPath = backupPath ?? oldState.LastBackupPath
             };
             SaveState(newState);
+            WriteInstallMetadata(new ManagedInstallMetadata
+            {
+                DistributionVersion = manifest.Version,
+                DiscordBranch = verifiedProbe.Branch,
+                PreparedAt = newState.InstalledAt ?? now,
+                VerifiedAt = now
+            });
             PruneBackups(3);
 
-            progress?.Report(new OperationProgress(repair ? "Repair complete." : "Update complete.", 100));
+            var completion = repair
+                ? "Repair verified · complete."
+                : previousProbe?.IsManagedPatch == true || hadManagedDirectory
+                    ? "Update verified · complete."
+                    : "Installation verified · complete.";
+            progress?.Report(new OperationProgress(completion, 100));
         }
         catch
         {
             progress?.Report(new OperationProgress("Update failed. Rolling back…"));
             TryRollback(backupPath, hadManagedDirectory);
+            TryRestorePreviousDiscordPatch(previousProbe, branch);
             throw;
         }
         finally
@@ -138,21 +202,25 @@ public sealed class InstallationService : IDisposable
         CancellationToken cancellationToken = default)
     {
         var state = LoadState();
-        if (!IsInstalled(state)) return;
+        var probe = _patchService.Probe(branch);
+        var hasManagedPatch = probe?.IsManagedPatch == true;
+        if (!hasManagedPatch && !HasManagedFiles()) return;
 
         IReadOnlyList<DiscordRestartTarget> restartTargets = Array.Empty<DiscordRestartTarget>();
         try
         {
             restartTargets = await _discordService.StopRunningAsync(progress, cancellationToken);
-            await _installerService.RunAsync("uninstall", branch, ManagerPaths.InstallDirectory, progress, cancellationToken);
+            if (hasManagedPatch)
+                _patchService.UnpatchManaged(probe!.Branch, progress);
 
             progress?.Report(new OperationProgress("Removing managed Vencord files…"));
             SafeDeleteDirectory(ManagerPaths.InstallDirectory);
             state.InstalledVersion = string.Empty;
             state.LastUpdatedAt = DateTimeOffset.UtcNow;
-            state.DiscordBranch = branch;
+            state.LastVerifiedAt = DateTimeOffset.UtcNow;
+            state.DiscordBranch = probe?.Branch ?? branch;
             SaveState(state);
-            progress?.Report(new OperationProgress("Uninstall complete.", 100));
+            progress?.Report(new OperationProgress("Uninstall verified · complete.", 100));
         }
         finally
         {
@@ -188,6 +256,91 @@ public sealed class InstallationService : IDisposable
             if (!File.Exists(destination)) File.Copy(source, destination);
         }
     }
+
+    private void TryRestorePreviousDiscordPatch(DiscordInstallProbe? previousProbe, string requestedBranch)
+    {
+        try
+        {
+            var branch = previousProbe?.Branch ?? requestedBranch;
+            var current = _patchService.Probe(branch);
+            if (previousProbe?.IsPatched == true)
+            {
+                if (!string.IsNullOrWhiteSpace(previousProbe.PatchTarget)
+                    && (!current?.IsPatched ?? true || !PathsEqual(current.PatchTarget, previousProbe.PatchTarget)))
+                    _patchService.RestorePatchTarget(branch, previousProbe.PatchTarget);
+            }
+            else if (current?.IsManagedPatch == true)
+            {
+                _patchService.EnsureUnpatched(branch);
+            }
+        }
+        catch
+        {
+            // Preserve the original installation exception. The managed-file backup remains available.
+        }
+    }
+
+    private static ManagedInstallMetadata? LoadInstallMetadata()
+    {
+        try
+        {
+            if (!File.Exists(ManagerPaths.InstallMetadataFile)) return null;
+            return JsonSerializer.Deserialize<ManagedInstallMetadata>(File.ReadAllText(ManagerPaths.InstallMetadataFile), JsonOptions);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static void WriteInstallMetadata(ManagedInstallMetadata metadata)
+    {
+        Directory.CreateDirectory(ManagerPaths.InstallDirectory);
+        File.WriteAllText(ManagerPaths.InstallMetadataFile, JsonSerializer.Serialize(metadata, JsonOptions));
+    }
+
+    private static bool LocalPackageMatchesManifest(UpdateManifest manifest)
+    {
+        try
+        {
+            var readmePath = Path.Combine(ManagerPaths.InstallDirectory, "README.md");
+            if (!File.Exists(readmePath)) return false;
+            var readme = File.ReadAllText(readmePath);
+            var orion = manifest.Components.OrionQuests.Trim().TrimStart('v', 'V');
+            var commit = manifest.Components.Vencord.Commit;
+            var shortCommit = commit.Length >= 8 ? commit[..8] : commit;
+
+            return readme.Contains($"OrionQuests v{orion}", StringComparison.OrdinalIgnoreCase)
+                && readme.Contains(manifest.Components.Vencord.Version, StringComparison.OrdinalIgnoreCase)
+                && (string.IsNullOrWhiteSpace(shortCommit) || readme.Contains(shortCommit, StringComparison.OrdinalIgnoreCase));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool PathsEqual(string left, string right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right)) return false;
+        try
+        {
+            return Path.GetFullPath(left).TrimEnd(Path.DirectorySeparatorChar)
+                .Equals(Path.GetFullPath(right).TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string DisplayBranch(string branch) => branch.ToLowerInvariant() switch
+    {
+        "stable" => "Discord Stable",
+        "ptb" => "Discord PTB",
+        "canary" => "Discord Canary",
+        _ => "Discord"
+    };
 
     private static string CreateBackupPath(string version)
     {

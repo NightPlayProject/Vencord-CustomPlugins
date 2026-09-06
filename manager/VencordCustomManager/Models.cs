@@ -88,9 +88,28 @@ public sealed class ManagerState
     public string InstalledVersion { get; set; } = string.Empty;
     public DateTimeOffset? InstalledAt { get; set; }
     public DateTimeOffset? LastUpdatedAt { get; set; }
+    public DateTimeOffset? LastVerifiedAt { get; set; }
     public string DiscordBranch { get; set; } = "auto";
     public string LastBackupPath { get; set; } = string.Empty;
 }
+
+public sealed class ManagedInstallMetadata
+{
+    public string DistributionVersion { get; set; } = string.Empty;
+    public string DiscordBranch { get; set; } = "auto";
+    public DateTimeOffset PreparedAt { get; set; }
+    public DateTimeOffset? VerifiedAt { get; set; }
+}
+
+public sealed record DiscordInstallProbe(
+    string Branch,
+    string BaseDirectory,
+    string ResourcesDirectory,
+    string AppAsarPath,
+    string BackupAsarPath,
+    bool IsPatched,
+    string PatchTarget,
+    bool IsManagedPatch);
 
 public sealed record OperationProgress(string Message, double? Percent = null);
 
@@ -98,5 +117,5 @@ public sealed record DiscordRestartTarget(string Branch, string UpdateExecutable
 
 public static class AppInfo
 {
-    public const string CurrentVersion = "0.1.0";
+    public const string CurrentVersion = "0.1.1";
 }

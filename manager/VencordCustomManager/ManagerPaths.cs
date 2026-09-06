@@ -12,6 +12,7 @@ public static class ManagerPaths
     public static string CacheDirectory => Path.Combine(Root, "cache");
     public static string StagingDirectory => Path.Combine(Root, "staging");
     public static string StateFile => Path.Combine(Root, "manager-state.json");
+    public static string InstallMetadataFile => Path.Combine(InstallDirectory, ".manager-install.json");
     public static string PluginsDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "Vencord",

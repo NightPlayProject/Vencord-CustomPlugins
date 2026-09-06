@@ -17,7 +17,7 @@ public sealed class UpdateClient : IDisposable
         {
             Timeout = TimeSpan.FromMinutes(10)
         };
-        _httpClient.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("VencordCustomManager", "0.1.0"));
+        _httpClient.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("VencordCustomManager", AppInfo.CurrentVersion));
         _httpClient.DefaultRequestHeaders.CacheControl = new CacheControlHeaderValue { NoCache = true };
     }
 

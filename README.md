@@ -9,6 +9,8 @@ Download **`VencordCustomManager.exe`** from the latest GitHub Release and run i
 The manager can:
 
 - install the latest verified Custom Vencord release
+- verify an existing local Vencord installation before contacting GitHub
+- recover manager state when Discord is already injected with the managed build
 - check GitHub for distribution and manager updates
 - verify downloads with SHA-256 before installation
 - back up the current build and roll back if an update fails
@@ -26,7 +28,7 @@ Once the manager is installed, future releases are discovered through `update-ma
 ## Current release
 
 - Distribution: **v1.0.0**
-- Custom Vencord Manager: **v0.1.0**
+- Custom Vencord Manager: **v0.1.1**
 - Vencord base: **1.15.4** (`0e40e433`)
 - OrionQuests: **v4.10.12**
 - Runtime custom-plugin loader: included

@@ -4,16 +4,21 @@
 
 The updater should:
 
-1. Fetch the manifest from the repository's raw `main` branch.
-2. Compare `version` against the locally installed distribution version.
-3. Download `assets.windows_release.url` only when a newer version exists.
-4. Verify the downloaded file against `assets.windows_release.sha256` before extracting anything.
-5. Ask Discord to close, then wait until Discord processes have exited.
-6. Back up the current custom Vencord folder before replacement.
-7. Replace the release files atomically where practical.
-8. Preserve `%APPDATA%\Vencord\plugins` and user settings.
-9. Roll back the backup if verification or installation fails.
-10. Restart Discord only after a successful update.
+1. Inspect the selected local Discord install **before any GitHub request**.
+2. Detect whether Discord is already patched and read the injected `app.asar` target.
+3. Recover manager state when that target is the manager-owned `dist\patcher.js`.
+4. Fetch the manifest from the repository's raw `main` branch.
+5. Compare `version` against the locally installed distribution version.
+6. Download `assets.windows_release.url` only when a newer version exists.
+7. Verify the downloaded file against `assets.windows_release.sha256` before extracting anything.
+8. Ask Discord to close, then wait until Discord processes have exited.
+9. Back up the current custom Vencord folder before replacement.
+10. Replace the release files atomically where practical.
+11. Preserve `%APPDATA%\Vencord\plugins` and user settings.
+12. Ensure Discord's injected `app.asar` points to the manager-owned `dist\patcher.js`.
+13. Verify `_app.asar`, the patch target, and the managed patcher file before reporting success.
+14. Roll back the managed-file backup and previous injection target if verification or installation fails.
+15. Restart Discord only after a successful verified update.
 
 The release version, URLs and hashes must be updated together for every publication.
 
