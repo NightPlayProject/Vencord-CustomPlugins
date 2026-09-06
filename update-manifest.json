@@ -1,0 +1,28 @@
+﻿{
+  "schema": 1,
+  "channel": "stable",
+  "version": "1.0.0",
+  "published_at": "2026-09-06T18:39:01Z",
+  "release_page": "https://github.com/NightPlayProject/Vencord-CustomPlugins/releases/tag/v1.0.0",
+  "components": {
+    "vencord": {
+      "version": "1.15.4",
+      "commit": "0e40e433d7aa9168f656aba733d01e761b7ca8ca"
+    },
+    "orion_quests": "4.10.12",
+    "nitro_sniper": "bundled",
+    "runtime_plugin_loader": true
+  },
+  "assets": {
+    "windows_release": {
+      "name": "Vencord-CustomPlugins-release.zip",
+      "url": "https://github.com/NightPlayProject/Vencord-CustomPlugins/releases/download/v1.0.0/Vencord-CustomPlugins-release.zip",
+      "sha256": "8CFCDEB68F92D1DC40627CB9CB43F82503B1BED2A7EF99670C55C26FA57788A9"
+    },
+    "source": {
+      "name": "Vencord-CustomPlugins-source.zip",
+      "url": "https://github.com/NightPlayProject/Vencord-CustomPlugins/releases/download/v1.0.0/Vencord-CustomPlugins-source.zip",
+      "sha256": "88287D5DC0CD38A3A5E1331A63ED79EAE4E5160CE495BF7739DBBD51FF2EA0CD"
+    }
+  }
+}
