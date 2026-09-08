@@ -31,7 +31,7 @@ import {
 import "./styles.css";
 
 const initialState = {
-  managerVersion: "0.1.4",
+  managerVersion: "0.1.5",
   statusText: "Loading manager state…",
   statusTone: "accent",
   selectedBranch: "stable",

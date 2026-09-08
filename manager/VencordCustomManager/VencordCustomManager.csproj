@@ -33,8 +33,8 @@
   </ItemGroup>
 
   <Target Name="EnsureWebUiAssets" BeforeTargets="PrepareResources">
-    <Error Condition="!Exists('..\WebUi\dist\index.html')"
-           Text="The embedded React dashboard has not been built. Run npm ci and npm run build in manager\WebUi before building the manager." />
+    <Error Condition="!Exists('..\WebUi\dist\index.html') Or !Exists('..\WebUi\dist\assets\app.js') Or !Exists('..\WebUi\dist\assets\app.css')"
+           Text="The embedded React dashboard is incomplete. Run npm ci and npm run build in manager\WebUi before building the manager." />
   </Target>
 
 </Project>

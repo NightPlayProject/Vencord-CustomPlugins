@@ -33,11 +33,18 @@ New installs write `.manager-install.json` beside each client payload with per-f
 
 ## UI
 
-The manager uses a fully custom WPF shell: custom title bar/window controls, custom segmented client selector, custom cards/buttons/progress surfaces, custom scrollbar styling, and in-app modal overlays instead of Windows `MessageBox` dialogs.
+The manager uses a hybrid UI. A native WPF shell owns the fixed 1040x800 window, custom title bar, lifecycle, fallback dashboard, and native safety surfaces. The main dashboard is React + Tailwind rendered through WebView2 with Lucide icons and restrained Framer Motion transitions. C# remains authoritative for client selection, installation state, recovery, integrity verification, rollback, Discord process handling, and self-update actions.
+
+The production React bundle is embedded into the single manager EXE. Friends do not need Node.js or npm; those are build-time dependencies only.
 
 ## Build
 
 ```powershell
+Set-Location WebUi
+npm ci
+npm run build
+Set-Location ..
+
 dotnet build VencordCustomManager.sln -c Release
 dotnet publish VencordCustomManager\VencordCustomManager.csproj `
   -c Release `
@@ -48,4 +55,4 @@ dotnet publish VencordCustomManager\VencordCustomManager.csproj `
   -o publish
 ```
 
-The release artifact is `publish\VencordCustomManager.exe`.
+The release artifact is `publish\VencordCustomManager.exe`. The .NET build intentionally fails if `WebUi\dist\index.html`, `assets\app.js`, or `assets\app.css` is missing, preventing a manager from being published without its embedded dashboard.
