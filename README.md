@@ -34,7 +34,7 @@ Once the manager is installed, future releases are discovered through `update-ma
 ## Current release
 
 - Distribution: **v1.0.2**
-- Custom Vencord Manager: **v0.1.6**
+- Custom Vencord Manager: **v0.1.7**
 - Vencord base: **1.15.4** (`0e40e433`)
 - OrionQuests: **v4.10.13**
 - Runtime custom-plugin loader: included
@@ -42,7 +42,7 @@ Once the manager is installed, future releases are discovered through `update-ma
 
 > **v1.0.1 was withdrawn.** Its payload archive was packaged incorrectly and is no longer offered. v1.0.2 is the corrected OrionQuests v4.10.13 release.
 
-Manager v0.1.6 keeps the redesigned React/Tailwind + WebView2 dashboard and adds a faster, flash-free startup path: the legacy WPF dashboard is shown only as a true WebView2 fallback, while a lightweight ReUI-black startup surface remains visible until React has mounted and applied native state. The fixed 1040×800 window and existing per-client installation, recovery, rollback, and update engine remain unchanged.
+Manager v0.1.7 makes the React/Tailwind dashboard feel effectively immediate: WebView2 environment startup begins at the application level, the loading state is a ReUI/shadcn-style skeleton that matches the final 1040×800 dashboard, native state is injected earlier, and the production frontend is lighter after replacing Framer Motion with focused CSS transitions. The legacy WPF dashboard remains a true failure fallback, while the existing per-client installation, recovery, rollback, and update engine remain unchanged.
 
 ## Manual install
 
