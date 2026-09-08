@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { AnimatePresence, motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   Activity,
   BadgeCheck,
@@ -284,6 +284,7 @@ function App() {
   const [dialog, setDialog] = useState(null);
   const [logExpanded, setLogExpanded] = useState(true);
   const logRef = useRef(null);
+  const reduceMotion = useReducedMotion();
 
   useEffect(() => {
     const webview = window.chrome?.webview;
@@ -465,15 +466,34 @@ function App() {
               <div className="relative mt-5">
                 <div className="mb-2 flex min-w-0 items-start justify-between gap-4 text-[9.5px] font-semibold text-zinc-600">
                   <span className="min-w-0 break-words leading-4">{progress.message}</span>
-                  <span className="shrink-0">{progress.indeterminate ? "working" : `${Math.round(percent)}%`}</span>
+                  <span className="shrink-0">{progress.indeterminate ? "working" : `${percent >= 100 ? 100 : Math.floor(percent)}%`}</span>
                 </div>
                 <div className="h-1.5 overflow-hidden rounded-full bg-white/[0.045]">
-                  <motion.div
-                    animate={progress.indeterminate ? { x: ["-35%", "160%"] } : { width: `${percent}%` }}
-                    transition={progress.indeterminate ? { duration: 1.15, repeat: Infinity, ease: "easeInOut" } : { duration: 0.2 }}
-                    className={cx("h-full rounded-full bg-gradient-to-r from-zinc-600 via-zinc-300 to-white", progress.indeterminate ? "w-[34%]" : "")}
-                    style={progress.indeterminate ? undefined : { width: `${percent}%` }}
-                  />
+                  {progress.indeterminate ? (
+                    reduceMotion ? (
+                      <div
+                        key="indeterminate-progress-reduced"
+                        className="h-full w-full rounded-full bg-gradient-to-r from-zinc-700 via-zinc-500 to-zinc-300 opacity-65"
+                      />
+                    ) : (
+                      <motion.div
+                        key="indeterminate-progress"
+                        initial={{ x: "-110%" }}
+                        animate={{ x: "310%" }}
+                        transition={{ duration: 1.15, repeat: Infinity, ease: "easeInOut" }}
+                        className="h-full w-[34%] rounded-full bg-gradient-to-r from-zinc-600 via-zinc-300 to-white"
+                      />
+                    )
+                  ) : (
+                    <div
+                      key="determinate-progress"
+                      className={cx(
+                        "h-full rounded-full bg-gradient-to-r from-zinc-600 via-zinc-300 to-white",
+                        percent < 100 && "transition-[width] duration-200 ease-out"
+                      )}
+                      style={{ width: `${percent}%` }}
+                    />
+                  )}
                 </div>
               </div>
           </motion.section>
