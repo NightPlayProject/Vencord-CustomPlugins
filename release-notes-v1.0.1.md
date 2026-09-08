@@ -1,6 +1,6 @@
 # v1.0.1
 
-> **WITHDRAWN.** This release's payload ZIP was packaged incorrectly and omitted `dist/package.json`, so manager integrity verification rejected it. The broken install ZIP has been removed. Use v1.0.0 until the corrected v1.0.2 release is available.
+> **WITHDRAWN.** This release's payload ZIP was packaged incorrectly and omitted `dist/package.json`, so manager integrity verification rejected it. The broken install ZIP has been removed. Use the corrected **v1.0.2** release instead.
 
 The intended payload changes were:
 
