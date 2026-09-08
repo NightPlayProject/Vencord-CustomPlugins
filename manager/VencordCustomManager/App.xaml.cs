@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows;
+using Microsoft.Web.WebView2.Core;
 
 namespace VencordCustomManager;
 
@@ -9,6 +10,7 @@ public partial class App : Application
     private const string MutexName = @"Local\NightPlayProject.VencordCustomManager";
     private Mutex? _singleInstanceMutex;
     private bool _ownsMutex;
+    internal static Task<CoreWebView2Environment>? WebViewEnvironmentTask { get; private set; }
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -19,6 +21,22 @@ public partial class App : Application
             TryActivateExistingInstance();
             Shutdown(0);
             return;
+        }
+
+        // Begin spinning up the Evergreen runtime before WPF creates MainWindow. The
+        // window consumes this same task, so the expensive browser-process startup
+        // overlaps application/XAML construction instead of starting afterwards.
+        try
+        {
+            ManagerPaths.EnsureCreated();
+            var userData = Path.Combine(ManagerPaths.Root, "webview2");
+            Directory.CreateDirectory(userData);
+            WebViewEnvironmentTask = CoreWebView2Environment.CreateAsync(null, userData);
+        }
+        catch
+        {
+            // MainWindow retains its normal creation/fallback path if prewarm cannot start.
+            WebViewEnvironmentTask = null;
         }
 
         base.OnStartup(e);

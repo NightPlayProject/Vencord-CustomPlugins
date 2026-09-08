@@ -1,6 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   Activity,
   BadgeCheck,
@@ -31,7 +30,7 @@ import {
 import "./styles.css";
 
 const initialState = {
-  managerVersion: "0.1.6",
+  managerVersion: "0.1.7",
   statusText: "Loading manager state…",
   statusTone: "accent",
   selectedBranch: "stable",
@@ -151,15 +150,14 @@ function ClientCard({ branch, client, disabled, onSelect }) {
   const style = toneMap[tone] ?? toneMap.neutral;
   const meta = clientMeta[branch];
   return (
-    <motion.button
+    <button
       id={`client-${branch}`}
       type="button"
       aria-pressed={selected}
-      whileTap={disabled ? undefined : { scale: 0.996 }}
       disabled={disabled}
       onClick={() => onSelect(branch)}
       className={cx(
-        "group relative h-[68px] w-full min-w-0 overflow-hidden rounded-[15px] border px-2.5 text-left transition-[border-color,background-color,box-shadow] duration-150",
+        "group relative h-[68px] w-full min-w-0 overflow-hidden rounded-[15px] border px-2.5 text-left transition-[border-color,background-color,box-shadow,transform] duration-150 active:scale-[.996]",
         selected
           ? "border-white/[0.18] bg-white/[0.055] shadow-[inset_0_0_0_1px_rgba(255,255,255,.025),0_10px_28px_rgba(0,0,0,.24)]"
           : "border-transparent bg-transparent hover:border-white/[0.075] hover:bg-white/[0.025]",
@@ -195,7 +193,7 @@ function ClientCard({ branch, client, disabled, onSelect }) {
           </div>
         </div>
       </div>
-    </motion.button>
+    </button>
   );
 }
 
@@ -213,6 +211,125 @@ function ComponentRow({ icon: Icon, name, value, accent = false }) {
   );
 }
 
+function SkeletonBlock({ className = "" }) {
+  return <span aria-hidden="true" className={cx("skeleton-block block", className)} />;
+}
+
+function DashboardSkeleton() {
+  return (
+    <main aria-busy="true" aria-label="Loading dashboard" className="relative h-full w-full overflow-hidden bg-[#050505] text-zinc-100">
+      <div className="pointer-events-none absolute inset-0 grid-overlay opacity-55" />
+      <div className="manager-shell relative grid h-full grid-cols-[226px_minmax(0,1fr)] max-[1100px]:grid-cols-[214px_minmax(0,1fr)] max-[980px]:grid-cols-[204px_minmax(0,1fr)]">
+        <aside className="manager-sidebar min-w-0 border-r border-white/[0.07] bg-[#070707]/95 px-[18px] py-5 max-[1100px]:px-4">
+          <div className="flex h-full flex-col">
+            <div className="flex items-center gap-3 px-1 pt-1">
+              <SkeletonBlock className="h-10 w-10 shrink-0 rounded-2xl" />
+              <div className="min-w-0 flex-1">
+                <SkeletonBlock className="h-3 w-[104px] rounded-md" />
+                <SkeletonBlock className="mt-2 h-2 w-[68px] rounded-md" />
+              </div>
+            </div>
+
+            <div className="mt-8 flex items-center gap-2 px-1">
+              <SkeletonBlock className="h-2 w-[76px] rounded-md" />
+              <span className="h-px flex-1 bg-white/[0.05]" />
+            </div>
+            <div className="mt-2.5 grid gap-1.5 rounded-[16px] border border-white/[0.07] bg-[#050505] p-1">
+              {[0, 1, 2].map(index => (
+                <div key={index} className="grid h-[68px] grid-cols-[36px_minmax(0,1fr)] items-center gap-2.5 rounded-[15px] px-2.5">
+                  <SkeletonBlock className="h-9 w-9 rounded-xl" />
+                  <div className="min-w-0">
+                    <SkeletonBlock className="h-2.5 w-[58px] rounded-md" />
+                    <SkeletonBlock className="mt-2 h-2 w-[88px] max-w-full rounded-md" />
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-auto rounded-2xl border border-white/[0.07] bg-[#080808] p-3.5">
+              <SkeletonBlock className="h-2.5 w-[96px] rounded-md" />
+              <SkeletonBlock className="mt-2.5 h-2 w-full rounded-md" />
+              <SkeletonBlock className="mt-2 h-2 w-[82%] rounded-md" />
+            </div>
+          </div>
+        </aside>
+
+        <section className="manager-scroll min-w-0 overflow-y-auto px-5 pb-6 pt-5 max-[1100px]:px-4">
+          <header className="flex min-w-0 items-start justify-between gap-5">
+            <div className="min-w-0 flex-1">
+              <SkeletonBlock className="h-2 w-[130px] rounded-md" />
+              <SkeletonBlock className="mt-4 h-6 w-[260px] max-w-[70%] rounded-lg" />
+              <SkeletonBlock className="mt-3 h-2.5 w-[285px] max-w-[78%] rounded-md" />
+            </div>
+            <SkeletonBlock className="h-10 w-[106px] shrink-0 rounded-xl" />
+          </header>
+
+          <section className="glass-card mt-5 overflow-hidden rounded-[20px] p-5">
+            <div className="flex min-w-0 items-start justify-between gap-6">
+              <div className="min-w-0 flex-1">
+                <SkeletonBlock className="h-[29px] w-[150px] rounded-full" />
+                <SkeletonBlock className="mt-5 h-6 w-[390px] max-w-[82%] rounded-lg" />
+                <SkeletonBlock className="mt-3 h-2.5 w-[425px] max-w-[92%] rounded-md" />
+              </div>
+              <SkeletonBlock className="h-[58px] w-[126px] shrink-0 rounded-2xl" />
+            </div>
+
+            <div className="mt-6 min-w-0 rounded-[16px] border border-white/[0.07] bg-[#080808] p-[18px]">
+              <div className="grid grid-cols-[1fr_auto_1fr] items-end gap-4">
+                <div>
+                  <SkeletonBlock className="h-2 w-[62px] rounded-md" />
+                  <SkeletonBlock className="mt-3 h-[30px] w-[116px] rounded-lg" />
+                </div>
+                <SkeletonBlock className="mb-2 h-4 w-4 rounded-md" />
+                <div>
+                  <SkeletonBlock className="h-2 w-[88px] rounded-md" />
+                  <SkeletonBlock className="mt-3 h-[30px] w-[116px] rounded-lg" />
+                </div>
+              </div>
+              <div className="mt-5 grid grid-cols-3 gap-2.5">
+                {[0, 1, 2].map(index => <SkeletonBlock key={index} className="h-14 w-full rounded-xl" />)}
+              </div>
+            </div>
+
+            <div className="mt-3.5 grid grid-cols-2 gap-2.5">
+              <SkeletonBlock className="h-[52px] w-full rounded-xl" />
+              <SkeletonBlock className="h-[52px] w-full rounded-xl" />
+            </div>
+            <div className="mt-5 flex items-center justify-between">
+              <SkeletonBlock className="h-2 w-[180px] rounded-md" />
+              <SkeletonBlock className="h-2 w-7 rounded-md" />
+            </div>
+            <SkeletonBlock className="mt-2 h-1.5 w-full rounded-full" />
+          </section>
+
+          <div className="mt-4 grid min-w-0 grid-cols-[1.08fr_.92fr] gap-4 max-[980px]:grid-cols-1">
+            {[0, 1].map(card => (
+              <section key={card} className="glass-card min-h-[260px] rounded-[18px] p-5">
+                <div className="flex items-center justify-between gap-3">
+                  <SkeletonBlock className="h-3 w-[130px] rounded-md" />
+                  <SkeletonBlock className="h-7 w-[64px] rounded-full" />
+                </div>
+                <SkeletonBlock className="mt-3 h-2 w-[190px] max-w-[70%] rounded-md" />
+                <div className="mt-4 grid grid-cols-2 gap-2.5">
+                  {[0, 1, 2, 3].map(row => <SkeletonBlock key={row} className="h-[54px] w-full rounded-xl" />)}
+                </div>
+              </section>
+            ))}
+          </div>
+
+          <section className="glass-card mt-4 rounded-[18px] p-5">
+            <div className="flex items-center justify-between">
+              <SkeletonBlock className="h-3 w-[110px] rounded-md" />
+              <div className="flex gap-2"><SkeletonBlock className="h-9 w-9 rounded-lg" /><SkeletonBlock className="h-9 w-20 rounded-lg" /></div>
+            </div>
+            <SkeletonBlock className="mt-4 h-[132px] w-full rounded-2xl" />
+          </section>
+        </section>
+      </div>
+    </main>
+  );
+}
+
 function ConfirmModal({ dialog, onResult }) {
   const cancelRef = useRef(null);
   const confirmRef = useRef(null);
@@ -220,6 +337,14 @@ function ConfirmModal({ dialog, onResult }) {
     if (!dialog) return;
     const target = dialog.tone === "danger" && dialog.showCancel ? cancelRef.current : confirmRef.current;
     setTimeout(() => target?.focus(), 0);
+
+    const handleKeyDown = event => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onResult(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, [dialog]);
 
   if (!dialog) return null;
@@ -228,21 +353,11 @@ function ConfirmModal({ dialog, onResult }) {
   const warning = tone === "warning";
   const success = tone === "success";
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="absolute inset-0 z-50 grid place-items-center bg-black/85 p-7 backdrop-blur-md"
-      onKeyDown={event => {
-        if (event.key === "Escape") onResult(false);
-      }}
+    <div
+      className="modal-backdrop-enter absolute inset-0 z-50 grid place-items-center bg-black/85 p-7 backdrop-blur-md"
     >
-      <motion.div
-        initial={{ opacity: 0, y: 12, scale: 0.975 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, y: 8, scale: 0.985 }}
-        transition={{ duration: 0.16, ease: [0.2, 0.8, 0.2, 1] }}
-        className="glass-card w-full max-w-[470px] rounded-[24px] p-5 shadow-[0_35px_110px_rgba(0,0,0,.55)]"
+      <div
+        className="modal-panel-enter glass-card w-full max-w-[470px] rounded-[24px] p-5 shadow-[0_35px_110px_rgba(0,0,0,.55)]"
       >
         <div className={cx(
           "grid h-11 w-11 place-items-center rounded-2xl border",
@@ -274,18 +389,18 @@ function ConfirmModal({ dialog, onResult }) {
             {dialog.confirmText}
           </button>
         </div>
-      </motion.div>
-    </motion.div>
+      </div>
+    </div>
   );
 }
 
 function App() {
-  const [state, setState] = useState(initialState);
+  const bootstrapState = window.__MANAGER_BOOTSTRAP__ || null;
+  const [state, setState] = useState(() => bootstrapState || initialState);
   const [dialog, setDialog] = useState(null);
   const [logExpanded, setLogExpanded] = useState(true);
-  const [hasNativeState, setHasNativeState] = useState(false);
+  const [hasNativeState, setHasNativeState] = useState(() => Boolean(bootstrapState) || !window.chrome?.webview);
   const logRef = useRef(null);
-  const reduceMotion = useReducedMotion();
 
   useEffect(() => {
     const webview = window.chrome?.webview;
@@ -301,6 +416,7 @@ function App() {
         setHasNativeState(true);
       }
       if (message.type === "dialog") setDialog(message);
+      if (message.type === "dialogClosed") setDialog(current => !current || current.id === message.id ? null : current);
     };
     webview.addEventListener("message", handler);
     nativePost({ type: "ready" });
@@ -348,19 +464,7 @@ function App() {
   };
 
   if (window.chrome?.webview && !hasNativeState) {
-    return (
-      <main className="grid h-full w-full place-items-center bg-[#050505] text-zinc-100">
-        <div className="flex flex-col items-center">
-          <div className="grid h-[42px] w-[42px] place-items-center rounded-[15px] border border-white/[0.10] bg-[#101010]">
-            <Zap size={18} className="text-zinc-100" strokeWidth={1.9} />
-          </div>
-          <div className="mt-3 text-[11px] font-semibold text-zinc-400">Loading dashboard</div>
-          <div className="mt-3 h-0.5 w-[74px] overflow-hidden rounded-full bg-zinc-900">
-            <div className="h-full w-[38%] rounded-full bg-zinc-300" />
-          </div>
-        </div>
-      </main>
-    );
+    return <DashboardSkeleton />;
   }
 
   return (
@@ -423,7 +527,7 @@ function App() {
             </div>
           </header>
 
-          <motion.section layout className="glass-card relative mt-5 overflow-hidden rounded-[20px] p-6 max-[1100px]:p-5">
+          <section className="glass-card relative mt-5 overflow-hidden rounded-[20px] p-6 max-[1100px]:p-5">
               <div className={cx("pointer-events-none absolute -right-20 -top-24 h-64 w-64 rounded-full blur-[80px]", statusTone === "success" ? "bg-emerald-400/[0.045]" : statusTone === "warning" ? "bg-amber-400/[0.045]" : statusTone === "danger" ? "bg-rose-400/[0.045]" : "bg-white/[0.025]")} />
               <div className="release-heading relative flex min-w-0 items-start justify-between gap-6 max-[980px]:gap-3">
                 <div className="min-w-0 flex-1">
@@ -496,20 +600,10 @@ function App() {
                 </div>
                 <div className="h-1.5 overflow-hidden rounded-full bg-white/[0.045]">
                   {progress.indeterminate ? (
-                    reduceMotion ? (
-                      <div
-                        key="indeterminate-progress-reduced"
-                        className="h-full w-full rounded-full bg-gradient-to-r from-zinc-700 via-zinc-500 to-zinc-300 opacity-65"
-                      />
-                    ) : (
-                      <motion.div
-                        key="indeterminate-progress"
-                        initial={{ x: "-110%" }}
-                        animate={{ x: "310%" }}
-                        transition={{ duration: 1.15, repeat: Infinity, ease: "easeInOut" }}
-                        className="h-full w-[34%] rounded-full bg-gradient-to-r from-zinc-600 via-zinc-300 to-white"
-                      />
-                    )
+                    <div
+                      key="indeterminate-progress"
+                      className="indeterminate-progress h-full w-[34%] rounded-full bg-gradient-to-r from-zinc-600 via-zinc-300 to-white"
+                    />
                   ) : (
                     <div
                       key="determinate-progress"
@@ -522,7 +616,7 @@ function App() {
                   )}
                 </div>
               </div>
-          </motion.section>
+          </section>
 
           <div className="secondary-grid mt-4 grid min-w-0 grid-cols-[1.08fr_.92fr] gap-4 max-[980px]:grid-cols-1">
             <section className="glass-card min-w-0 rounded-[18px] p-5">
@@ -570,22 +664,16 @@ function App() {
                 <button type="button" onClick={() => setLogExpanded(v => !v)} className="min-h-9 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 text-[9.8px] font-bold text-slate-500 transition-colors hover:text-slate-200">{logExpanded ? "Collapse" : "Expand"}</button>
               </div>
             </div>
-            <AnimatePresence initial={false}>
-              {logExpanded && (
-                <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 176, opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="mt-4 overflow-hidden">
-                  <div ref={logRef} className="manager-scroll inner-surface h-full overflow-y-auto rounded-2xl p-4 font-mono text-[10.2px] leading-[1.7] text-slate-400 whitespace-pre-wrap break-words">
-                    {state.log || "Waiting for manager activity…"}
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
+            <div className={cx("activity-log-wrap overflow-hidden transition-[height,opacity,margin] duration-150", logExpanded ? "mt-4 h-44 opacity-100" : "mt-0 h-0 opacity-0")}>
+              <div ref={logRef} className="manager-scroll inner-surface h-full overflow-y-auto rounded-2xl p-4 font-mono text-[10.2px] leading-[1.7] text-slate-400 whitespace-pre-wrap break-words">
+                {state.log || "Waiting for manager activity…"}
+              </div>
+            </div>
           </section>
         </section>
       </div>
 
-      <AnimatePresence>
-        {dialog && <ConfirmModal dialog={dialog} onResult={resolveDialog} />}
-      </AnimatePresence>
+      {dialog && <ConfirmModal dialog={dialog} onResult={resolveDialog} />}
     </main>
   );
 }

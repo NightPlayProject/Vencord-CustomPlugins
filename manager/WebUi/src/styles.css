@@ -74,6 +74,60 @@ button:focus-visible,
   border: 1px solid rgba(255, 255, 255, 0.075);
 }
 
+.skeleton-block {
+  position: relative;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.055);
+}
+
+.skeleton-block::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 20%,
+    rgba(255, 255, 255, 0.045) 46%,
+    rgba(255, 255, 255, 0.065) 50%,
+    rgba(255, 255, 255, 0.045) 54%,
+    transparent 80%
+  );
+  transform: translateX(-120%);
+  animation: skeleton-shimmer 1.7s linear infinite;
+}
+
+@keyframes skeleton-shimmer {
+  to { transform: translateX(120%); }
+}
+
+.modal-backdrop-enter {
+  animation: modal-backdrop-in 120ms ease-out both;
+}
+
+.modal-panel-enter {
+  animation: modal-panel-in 150ms cubic-bezier(.2,.8,.2,1) both;
+}
+
+@keyframes modal-backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes modal-panel-in {
+  from { opacity: 0; transform: translateY(8px) scale(.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.indeterminate-progress {
+  animation: progress-sweep 1.15s ease-in-out infinite;
+}
+
+@keyframes progress-sweep {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(310%); }
+}
+
 .grid-overlay {
   background-image:
     radial-gradient(circle, rgba(255, 255, 255, 0.048) 0.55px, transparent 0.7px),
@@ -108,5 +162,15 @@ button:focus-visible,
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;
     transition-duration: 0.001ms !important;
+  }
+
+  .skeleton-block::after {
+    display: none;
+  }
+
+  .indeterminate-progress {
+    width: 100% !important;
+    transform: none !important;
+    opacity: 0.65;
   }
 }

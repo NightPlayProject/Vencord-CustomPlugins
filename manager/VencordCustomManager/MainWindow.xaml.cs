@@ -68,8 +68,6 @@ public partial class MainWindow : Window
         ApplySavedBranch();
         if (_installationService.GetPendingRecoveryBranches().Count == 0)
             _state = _installationService.RecoverAllStateFromLocalInstallations();
-        RefreshClientProbes();
-        _localProbe = ResolveSelectedProbe();
         RefreshUi();
     }
 
@@ -98,7 +96,8 @@ public partial class MainWindow : Window
             var userData = Path.Combine(ManagerPaths.Root, "webview2");
             Directory.CreateDirectory(userData);
 
-            var environment = await CoreWebView2Environment.CreateAsync(null, userData);
+            var environment = await (App.WebViewEnvironmentTask ?? CoreWebView2Environment.CreateAsync(null, userData));
+            WebDashboard.DefaultBackgroundColor = System.Drawing.Color.FromArgb(255, 5, 5, 5);
             await WebDashboard.EnsureCoreWebView2Async(environment);
             var core = WebDashboard.CoreWebView2;
 
@@ -110,7 +109,9 @@ public partial class MainWindow : Window
             core.Settings.IsBuiltInErrorPageEnabled = false;
 
             core.WebMessageReceived += WebDashboard_WebMessageReceived;
+            var bootstrapJson = JsonSerializer.Serialize(BuildWebStateSnapshot());
             await core.AddScriptToExecuteOnDocumentCreatedAsync(
+                $"window.__MANAGER_BOOTSTRAP__={bootstrapJson};" +
                 "window.addEventListener('error',e=>window.chrome?.webview?.postMessage({type:'webError',message:e.message||'Unknown script error'}));" +
                 "window.addEventListener('unhandledrejection',e=>window.chrome?.webview?.postMessage({type:'webError',message:String(e.reason||'Unhandled promise rejection')}));");
             core.ProcessFailed += (_, args) =>
@@ -145,13 +146,9 @@ public partial class MainWindow : Window
                     return;
                 }
 
-                // A successfully navigated React document paints its own ReUI-black
-                // loading surface until the first native state snapshot is applied.
-                // Showing it here lets WebView2 run normally without ever exposing
-                // the legacy WPF dashboard during a healthy startup.
-                WebDashboard.Visibility = Visibility.Visible;
-                StartupSurface.Visibility = Visibility.Collapsed;
-                LegacyDashboard.Visibility = Visibility.Collapsed;
+                // Keep the native skeleton on-screen until React itself confirms it has
+                // mounted. This avoids exposing an empty WebView if JavaScript fails after
+                // navigation and makes the native -> React skeleton handoff invisible.
             };
 
             core.SetVirtualHostNameToFolderMapping(
@@ -253,13 +250,13 @@ public partial class MainWindow : Window
             {
                 case "ready":
                     _webUiReady = true;
+                    WebDashboard.Visibility = Visibility.Visible;
+                    StartupSurface.Visibility = Visibility.Collapsed;
+                    LegacyDashboard.Visibility = Visibility.Collapsed;
                     SendWebState();
                     break;
                 case "rendered":
                     if (!_webUiReady) return;
-                    WebDashboard.Visibility = Visibility.Visible;
-                    StartupSurface.Visibility = Visibility.Collapsed;
-                    LegacyDashboard.Visibility = Visibility.Collapsed;
                     _webUiReadyCompletion?.TrySetResult(true);
                     break;
                 case "selectBranch":
@@ -327,64 +324,67 @@ public partial class MainWindow : Window
         if (!_webUiReady || WebDashboard.CoreWebView2 is null) return;
         try
         {
-            var selected = SelectedBranch();
-            var effectiveSelected = selected.Equals("auto", StringComparison.OrdinalIgnoreCase)
-                ? _localProbe?.Branch ?? "auto"
-                : selected;
-
-            var state = new
-            {
-                managerVersion = AppInfo.CurrentVersion,
-                statusText = StatusText.Text,
-                statusTone = ToneName(_currentStatusTone),
-                selectedBranch = effectiveSelected,
-                selectedChannelLabel = SelectedChannelLabel(),
-                installedVersion = InstalledVersionText.Text,
-                latestVersion = LatestVersionText.Text,
-                components = new
-                {
-                    vencord = VencordVersionText.Text,
-                    orion = OrionVersionText.Text,
-                    nitro = NitroVersionText.Text,
-                    loader = LoaderStatusText.Text
-                },
-                clients = new
-                {
-                    stable = BuildClientWebState("stable", StableClientStatusText.Text, effectiveSelected),
-                    ptb = BuildClientWebState("ptb", PtbClientStatusText.Text, effectiveSelected),
-                    canary = BuildClientWebState("canary", CanaryClientStatusText.Text, effectiveSelected)
-                },
-                actions = new
-                {
-                    primary = new { label = PrimaryButton.Content?.ToString() ?? "Continue", enabled = PrimaryButton.IsEnabled },
-                    check = new { enabled = CheckButton.IsEnabled },
-                    repair = new { enabled = RepairButton.IsEnabled },
-                    uninstall = new { enabled = UninstallButton.IsEnabled },
-                    plugins = new { enabled = OpenPluginsButton.IsEnabled },
-                    installFolder = new { enabled = OpenInstallButton.IsEnabled },
-                    managerUpdate = new
-                    {
-                        visible = ManagerUpdateButton.Visibility == Visibility.Visible,
-                        label = ManagerUpdateButton.Content?.ToString() ?? "Update manager",
-                        enabled = ManagerUpdateButton.IsEnabled
-                    }
-                },
-                progress = new
-                {
-                    message = ProgressText.Text,
-                    value = OperationProgressBar.Value,
-                    indeterminate = OperationProgressBar.IsIndeterminate
-                },
-                busy = _busy,
-                log = ActivityLogText.Text
-            };
-
-            PostWebMessage(new { type = "state", data = state });
+            PostWebMessage(new { type = "state", data = BuildWebStateSnapshot() });
         }
         catch (Exception ex)
         {
             Debug.WriteLine("Could not synchronize React dashboard state: " + ex.Message);
         }
+    }
+
+    private object BuildWebStateSnapshot()
+    {
+        var selected = SelectedBranch();
+        var effectiveSelected = selected.Equals("auto", StringComparison.OrdinalIgnoreCase)
+            ? _localProbe?.Branch ?? "auto"
+            : selected;
+
+        return new
+        {
+            managerVersion = AppInfo.CurrentVersion,
+            statusText = StatusText.Text,
+            statusTone = ToneName(_currentStatusTone),
+            selectedBranch = effectiveSelected,
+            selectedChannelLabel = SelectedChannelLabel(),
+            installedVersion = InstalledVersionText.Text,
+            latestVersion = LatestVersionText.Text,
+            components = new
+            {
+                vencord = VencordVersionText.Text,
+                orion = OrionVersionText.Text,
+                nitro = NitroVersionText.Text,
+                loader = LoaderStatusText.Text
+            },
+            clients = new
+            {
+                stable = BuildClientWebState("stable", StableClientStatusText.Text, effectiveSelected),
+                ptb = BuildClientWebState("ptb", PtbClientStatusText.Text, effectiveSelected),
+                canary = BuildClientWebState("canary", CanaryClientStatusText.Text, effectiveSelected)
+            },
+            actions = new
+            {
+                primary = new { label = PrimaryButton.Content?.ToString() ?? "Continue", enabled = PrimaryButton.IsEnabled },
+                check = new { enabled = CheckButton.IsEnabled },
+                repair = new { enabled = RepairButton.IsEnabled },
+                uninstall = new { enabled = UninstallButton.IsEnabled },
+                plugins = new { enabled = OpenPluginsButton.IsEnabled },
+                installFolder = new { enabled = OpenInstallButton.IsEnabled },
+                managerUpdate = new
+                {
+                    visible = ManagerUpdateButton.Visibility == Visibility.Visible,
+                    label = ManagerUpdateButton.Content?.ToString() ?? "Update manager",
+                    enabled = ManagerUpdateButton.IsEnabled
+                }
+            },
+            progress = new
+            {
+                message = ProgressText.Text,
+                value = OperationProgressBar.Value,
+                indeterminate = OperationProgressBar.IsIndeterminate
+            },
+            busy = _busy,
+            log = ActivityLogText.Text
+        };
     }
 
     private object BuildClientWebState(string branch, string status, string selectedBranch)
@@ -481,7 +481,7 @@ public partial class MainWindow : Window
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key == Key.Escape && DialogOverlay.Visibility == Visibility.Visible)
+        if (e.Key == Key.Escape && (DialogOverlay.Visibility == Visibility.Visible || _webDialogActive))
         {
             CompleteDialog(false);
             e.Handled = true;
@@ -1481,8 +1481,10 @@ public partial class MainWindow : Window
 
         if (_webDialogActive)
         {
+            var closedDialogId = _webDialogId;
             _webDialogActive = false;
             _webDialogId = null;
+            PostWebMessage(new { type = "dialogClosed", id = closedDialogId });
             var previousWebFocus = _dialogPreviousFocus;
             _dialogPreviousFocus = null;
             if (previousWebFocus is not null)
