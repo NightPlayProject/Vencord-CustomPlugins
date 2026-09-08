@@ -1,0 +1,11 @@
+# v1.0.1
+
+Payload update for existing Custom Vencord installations.
+
+- OrionQuests updated from **v4.10.12** to **v4.10.13** (upstream `8eab919d`).
+- Fixes the unrunnable-quest rescan loop: quests this Discord client cannot drive are skipped for the rest of that Orion run instead of being rediscovered every cycle.
+- Adds explicit handling and messaging for `ACHIEVEMENT_IN_GAME` quests that require the real linked game/achievement rather than Discord activity automation.
+- Tracks completed, blocked, and failed quest outcomes separately so Orion no longer reports a failed or skipped-only run as "all completed".
+- Keeps the local Vencord integration/lint customizations used by this distribution.
+- Vencord itself remains current at **1.15.4 / `0e40e433`**; there was no newer upstream Vencord commit to merge for this release.
+- Custom Vencord Manager remains **v0.1.4**; no manager binary changes were required.
