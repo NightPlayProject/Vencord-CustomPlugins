@@ -27,6 +27,21 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.x"
+          cache: npm
+          cache-dependency-path: manager/WebUi/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: manager/WebUi
+        run: npm ci
+
+      - name: Build React dashboard
+        working-directory: manager/WebUi
+        run: npm run build
+
       - name: Build
         run: dotnet build manager\VencordCustomManager.sln -c Release
 

@@ -1,0 +1,112 @@
+@import "tailwindcss";
+
+:root {
+  font-family: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  color: #f4f4f5;
+  background: #050505;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-width: 100%;
+  height: 100%;
+  min-height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  background:
+    radial-gradient(circle at 76% -8%, rgba(255, 255, 255, 0.05), transparent 29%),
+    radial-gradient(circle at 22% 0%, rgba(255, 255, 255, 0.025), transparent 21%),
+    linear-gradient(180deg, #050505 0%, #070707 52%, #050505 100%);
+}
+
+button,
+[role="button"] {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid rgba(244, 244, 245, 0.88);
+  outline-offset: 2px;
+}
+
+.manager-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(113, 113, 122, 0.52) transparent;
+}
+
+.manager-scroll::-webkit-scrollbar {
+  width: 9px;
+}
+
+.manager-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.manager-scroll::-webkit-scrollbar-thumb {
+  background: rgba(113, 113, 122, 0.42);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 999px;
+}
+
+.glass-card {
+  background: linear-gradient(180deg, rgba(16, 16, 16, 0.985), rgba(9, 9, 9, 0.985));
+  border: 1px solid rgba(255, 255, 255, 0.085);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.02),
+    0 18px 52px rgba(0, 0, 0, 0.28);
+}
+
+.inner-surface {
+  background: linear-gradient(180deg, rgba(7, 7, 7, 0.98), rgba(10, 10, 10, 0.98));
+  border: 1px solid rgba(255, 255, 255, 0.075);
+}
+
+.grid-overlay {
+  background-image:
+    radial-gradient(circle, rgba(255, 255, 255, 0.048) 0.55px, transparent 0.7px),
+    linear-gradient(rgba(255, 255, 255, 0.012) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.012) 1px, transparent 1px);
+  background-size: 7px 7px, 32px 32px, 32px 32px;
+  mask-image: linear-gradient(to bottom, rgba(0,0,0,0.7), rgba(0,0,0,0.25) 58%, transparent 88%);
+}
+
+.shine {
+  position: relative;
+  overflow: hidden;
+}
+
+.shine::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(115deg, transparent 25%, rgba(255,255,255,.07) 48%, transparent 70%);
+  transform: translateX(-130%);
+  transition: transform 550ms cubic-bezier(.2,.8,.2,1);
+}
+
+.shine:hover::after {
+  transform: translateX(130%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.001ms !important;
+  }
+}

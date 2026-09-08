@@ -1,9 +1,15 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
+using Microsoft.Web.WebView2.Core;
 
 namespace VencordCustomManager;
 
@@ -20,25 +26,33 @@ public partial class MainWindow : Window
     private bool _smoothScrollRenderingSubscribed;
     private string _lastProgressMessage = string.Empty;
     private TaskCompletionSource<bool>? _dialogCompletion;
+    private IInputElement? _dialogPreviousFocus;
+    private bool _webUiReady;
+    private bool _webDialogActive;
+    private string? _webDialogId;
+    private DialogTone _currentStatusTone = DialogTone.Accent;
 
-    private static readonly SolidColorBrush AccentBrush = Brush(0x87, 0x95, 0xFF);
-    private static readonly SolidColorBrush AccentSoftBrush = Brush(0x1D, 0x24, 0x4A);
-    private static readonly SolidColorBrush AccentBorderBrush = Brush(0x34, 0x41, 0x78);
-    private static readonly SolidColorBrush SuccessBrush = Brush(0x58, 0xC9, 0x95);
-    private static readonly SolidColorBrush SuccessSoftBrush = Brush(0x13, 0x2A, 0x25);
-    private static readonly SolidColorBrush SuccessBorderBrush = Brush(0x24, 0x50, 0x43);
-    private static readonly SolidColorBrush WarningBrush = Brush(0xF0, 0xB4, 0x5B);
-    private static readonly SolidColorBrush WarningSoftBrush = Brush(0x2C, 0x25, 0x18);
-    private static readonly SolidColorBrush WarningBorderBrush = Brush(0x58, 0x46, 0x29);
-    private static readonly SolidColorBrush DangerBrush = Brush(0xF0, 0x7B, 0x87);
-    private static readonly SolidColorBrush DangerSoftBrush = Brush(0x32, 0x1B, 0x21);
-    private static readonly SolidColorBrush DangerBorderBrush = Brush(0x5A, 0x29, 0x33);
-    private static readonly SolidColorBrush NeutralBrush = Brush(0x92, 0x9C, 0xAB);
-    private static readonly SolidColorBrush NeutralSoftBrush = Brush(0x15, 0x1B, 0x24);
-    private static readonly SolidColorBrush NeutralBorderBrush = Brush(0x25, 0x2D, 0x3A);
+    private static readonly SolidColorBrush AccentBrush = Brush(0xF4, 0xF4, 0xF5);
+    private static readonly SolidColorBrush AccentSoftBrush = Brush(0x1A, 0x1A, 0x1A);
+    private static readonly SolidColorBrush AccentBorderBrush = Brush(0x3F, 0x3F, 0x46);
+    private static readonly SolidColorBrush SuccessBrush = Brush(0x34, 0xD3, 0x99);
+    private static readonly SolidColorBrush SuccessSoftBrush = Brush(0x10, 0x25, 0x1D);
+    private static readonly SolidColorBrush SuccessBorderBrush = Brush(0x20, 0x4A, 0x3A);
+    private static readonly SolidColorBrush WarningBrush = Brush(0xFB, 0xBF, 0x24);
+    private static readonly SolidColorBrush WarningSoftBrush = Brush(0x2A, 0x21, 0x10);
+    private static readonly SolidColorBrush WarningBorderBrush = Brush(0x5A, 0x45, 0x17);
+    private static readonly SolidColorBrush DangerBrush = Brush(0xFB, 0x71, 0x85);
+    private static readonly SolidColorBrush DangerSoftBrush = Brush(0x30, 0x16, 0x1D);
+    private static readonly SolidColorBrush DangerBorderBrush = Brush(0x5B, 0x27, 0x32);
+    private static readonly SolidColorBrush NeutralBrush = Brush(0xA1, 0xA1, 0xAA);
+    private static readonly SolidColorBrush NeutralSoftBrush = Brush(0x14, 0x14, 0x14);
+    private static readonly SolidColorBrush NeutralBorderBrush = Brush(0x27, 0x27, 0x2A);
+    private static readonly SolidColorBrush ClientRowBrush = Brush(0x09, 0x09, 0x09);
+    private static readonly SolidColorBrush ClientRowBorderBrush = Brush(0x26, 0x26, 0x26);
+    private static readonly SolidColorBrush SelectedClientRowBrush = Brush(0x18, 0x18, 0x18);
 
     private const double WheelScrollMultiplier = 0.72;
-    private static readonly TimeSpan SmoothScrollDuration = TimeSpan.FromMilliseconds(175);
+    private static readonly TimeSpan SmoothScrollDuration = TimeSpan.FromMilliseconds(145);
 
     public MainWindow()
     {
@@ -54,11 +68,335 @@ public partial class MainWindow : Window
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
+        await InitializeWebUiAsync();
         AppendLog($"Custom Vencord Manager v{AppInfo.CurrentVersion} started.");
         AppendLog("Managed installation storage ready.");
         await RecoverInterruptedOperationsAsync();
         await CheckForUpdatesAsync(showSuccessDialog: false);
     }
+
+    private async Task InitializeWebUiAsync()
+    {
+        try
+        {
+            ManagerPaths.EnsureCreated();
+            var webRoot = ExtractEmbeddedWebUi();
+            var userData = Path.Combine(ManagerPaths.Root, "webview2");
+            Directory.CreateDirectory(userData);
+
+            var environment = await CoreWebView2Environment.CreateAsync(null, userData);
+            await WebDashboard.EnsureCoreWebView2Async(environment);
+            var core = WebDashboard.CoreWebView2;
+
+            core.Settings.AreDevToolsEnabled = false;
+            core.Settings.AreDefaultContextMenusEnabled = false;
+            core.Settings.AreBrowserAcceleratorKeysEnabled = false;
+            core.Settings.IsStatusBarEnabled = false;
+            core.Settings.IsZoomControlEnabled = false;
+            core.Settings.IsBuiltInErrorPageEnabled = false;
+
+            core.WebMessageReceived += WebDashboard_WebMessageReceived;
+            await core.AddScriptToExecuteOnDocumentCreatedAsync(
+                "window.addEventListener('error',e=>window.chrome?.webview?.postMessage({type:'webError',message:e.message||'Unknown script error'}));" +
+                "window.addEventListener('unhandledrejection',e=>window.chrome?.webview?.postMessage({type:'webError',message:String(e.reason||'Unhandled promise rejection')}));");
+            core.ProcessFailed += (_, args) =>
+                AppendLog($"Web UI process failure: {args.ProcessFailedKind}.");
+            core.NewWindowRequested += (_, args) =>
+            {
+                args.Handled = true;
+                if (Uri.TryCreate(args.Uri, UriKind.Absolute, out var uri) &&
+                    (uri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase) || uri.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase)))
+                    OpenUrl(uri.AbsoluteUri);
+            };
+            core.NavigationStarting += (_, args) =>
+            {
+                if (!Uri.TryCreate(args.Uri, UriKind.Absolute, out var uri) ||
+                    !uri.Host.Equals("manager.local", StringComparison.OrdinalIgnoreCase))
+                {
+                    args.Cancel = true;
+                    if (Uri.TryCreate(args.Uri, UriKind.Absolute, out var external) &&
+                        (external.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase) || external.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase)))
+                        OpenUrl(external.AbsoluteUri);
+                }
+            };
+            core.PermissionRequested += (_, args) => args.State = CoreWebView2PermissionState.Deny;
+
+            WebDashboard.NavigationCompleted += (_, args) =>
+            {
+                if (!args.IsSuccess)
+                {
+                    AppendLog($"React dashboard load failed: {args.WebErrorStatus}.");
+                    return;
+                }
+                WebDashboard.Visibility = Visibility.Visible;
+                LegacyDashboard.Visibility = Visibility.Collapsed;
+                AppendLog("React + Tailwind dashboard loaded.");
+                SendWebState();
+            };
+
+            core.SetVirtualHostNameToFolderMapping(
+                "manager.local",
+                webRoot,
+                CoreWebView2HostResourceAccessKind.Allow);
+            WebDashboard.Source = new Uri("https://manager.local/index.html");
+        }
+        catch (Exception ex)
+        {
+            _webUiReady = false;
+            LegacyDashboard.Visibility = Visibility.Visible;
+            WebDashboard.Visibility = Visibility.Collapsed;
+            Debug.WriteLine("React dashboard unavailable; using native fallback. " + ex);
+            AppendLog("React dashboard fallback: " + ex.Message);
+        }
+    }
+
+    private static string ExtractEmbeddedWebUi()
+    {
+        const string resourcePrefix = "WebUi/";
+        var assembly = Assembly.GetExecutingAssembly();
+        var resourceNames = assembly.GetManifestResourceNames()
+            .Where(name => name.StartsWith(resourcePrefix, StringComparison.Ordinal))
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+
+        if (resourceNames.Length == 0)
+            throw new InvalidDataException("The embedded React dashboard is missing from this manager build.");
+
+        var resources = new List<(string RelativePath, byte[] Data)>(resourceNames.Length);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        foreach (var resourceName in resourceNames)
+        {
+            using var stream = assembly.GetManifestResourceStream(resourceName)
+                ?? throw new InvalidDataException($"Embedded UI resource could not be opened: {resourceName}");
+            using var memory = new MemoryStream();
+            stream.CopyTo(memory);
+            var data = memory.ToArray();
+            var relative = resourceName[resourcePrefix.Length..].Replace('\\', '/');
+            if (string.IsNullOrWhiteSpace(relative)) continue;
+
+            var nameBytes = Encoding.UTF8.GetBytes(relative);
+            hash.AppendData(nameBytes);
+            hash.AppendData(data);
+            resources.Add((relative, data));
+        }
+
+        var fingerprint = Convert.ToHexString(hash.GetHashAndReset())[..20];
+        var cacheRoot = Path.Combine(ManagerPaths.Root, "web-ui-cache");
+        var target = Path.Combine(cacheRoot, fingerprint);
+        var indexPath = Path.Combine(target, "index.html");
+        if (File.Exists(indexPath)) return target;
+
+        Directory.CreateDirectory(cacheRoot);
+        var staging = Path.Combine(cacheRoot, $".{fingerprint}.staging-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(staging);
+        try
+        {
+            var stagingRoot = Path.GetFullPath(staging).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            foreach (var resource in resources)
+            {
+                var relative = resource.RelativePath.Replace('/', Path.DirectorySeparatorChar);
+                var destination = Path.GetFullPath(Path.Combine(staging, relative));
+                if (!destination.StartsWith(stagingRoot, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("Embedded UI resource path escaped the extraction directory.");
+
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                File.WriteAllBytes(destination, resource.Data);
+            }
+
+            if (!File.Exists(Path.Combine(staging, "index.html")))
+                throw new InvalidDataException("The embedded React dashboard does not contain index.html.");
+
+            if (Directory.Exists(target))
+                Directory.Delete(staging, recursive: true);
+            else
+                Directory.Move(staging, target);
+        }
+        catch
+        {
+            try { if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true); }
+            catch { }
+            throw;
+        }
+
+        return target;
+    }
+
+    private void WebDashboard_WebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(e.WebMessageAsJson);
+            var root = document.RootElement;
+            if (!root.TryGetProperty("type", out var typeNode)) return;
+            var type = typeNode.GetString();
+
+            switch (type)
+            {
+                case "ready":
+                    _webUiReady = true;
+                    SendWebState();
+                    break;
+                case "selectBranch":
+                    if (root.TryGetProperty("branch", out var branchNode))
+                        SelectBranchFromWeb(branchNode.GetString());
+                    break;
+                case "action":
+                    if (root.TryGetProperty("action", out var actionNode))
+                        HandleWebAction(actionNode.GetString());
+                    break;
+                case "dialogResult":
+                    if (root.TryGetProperty("id", out var idNode) &&
+                        root.TryGetProperty("result", out var resultNode) &&
+                        string.Equals(idNode.GetString(), _webDialogId, StringComparison.Ordinal))
+                        CompleteDialog(resultNode.ValueKind == JsonValueKind.True);
+                    break;
+                case "webError":
+                    if (root.TryGetProperty("message", out var errorNode))
+                        AppendLog("Web UI error: " + errorNode.GetString());
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("Ignored invalid React dashboard message: " + ex.Message);
+        }
+    }
+
+    private void SelectBranchFromWeb(string? branch)
+    {
+        if (_busy || string.IsNullOrWhiteSpace(branch)) return;
+        switch (branch.ToLowerInvariant())
+        {
+            case "stable":
+                BranchStable.IsChecked = true;
+                break;
+            case "ptb":
+                BranchPtb.IsChecked = true;
+                break;
+            case "canary":
+                BranchCanary.IsChecked = true;
+                break;
+        }
+    }
+
+    private void HandleWebAction(string? action)
+    {
+        switch (action)
+        {
+            case "primary": PrimaryButton_Click(this, new RoutedEventArgs()); break;
+            case "check": CheckButton_Click(this, new RoutedEventArgs()); break;
+            case "repair": RepairButton_Click(this, new RoutedEventArgs()); break;
+            case "uninstall": UninstallButton_Click(this, new RoutedEventArgs()); break;
+            case "plugins": OpenPluginsButton_Click(this, new RoutedEventArgs()); break;
+            case "installFolder": OpenInstallButton_Click(this, new RoutedEventArgs()); break;
+            case "viewRelease": ViewRelease_Click(this, new RoutedEventArgs()); break;
+            case "managerUpdate": ManagerUpdateButton_Click(this, new RoutedEventArgs()); break;
+            case "copyLog": CopyActivityButton_Click(this, new RoutedEventArgs()); break;
+            case "clearLog": ClearActivityButton_Click(this, new RoutedEventArgs()); break;
+        }
+    }
+
+    private void SendWebState()
+    {
+        if (!_webUiReady || WebDashboard.CoreWebView2 is null) return;
+        try
+        {
+            var selected = SelectedBranch();
+            var effectiveSelected = selected.Equals("auto", StringComparison.OrdinalIgnoreCase)
+                ? _localProbe?.Branch ?? "auto"
+                : selected;
+
+            var state = new
+            {
+                managerVersion = AppInfo.CurrentVersion,
+                statusText = StatusText.Text,
+                statusTone = ToneName(_currentStatusTone),
+                selectedBranch = effectiveSelected,
+                selectedChannelLabel = SelectedChannelLabel(),
+                installedVersion = InstalledVersionText.Text,
+                latestVersion = LatestVersionText.Text,
+                components = new
+                {
+                    vencord = VencordVersionText.Text,
+                    orion = OrionVersionText.Text,
+                    nitro = NitroVersionText.Text,
+                    loader = LoaderStatusText.Text
+                },
+                clients = new
+                {
+                    stable = BuildClientWebState("stable", StableClientStatusText.Text, effectiveSelected),
+                    ptb = BuildClientWebState("ptb", PtbClientStatusText.Text, effectiveSelected),
+                    canary = BuildClientWebState("canary", CanaryClientStatusText.Text, effectiveSelected)
+                },
+                actions = new
+                {
+                    primary = new { label = PrimaryButton.Content?.ToString() ?? "Continue", enabled = PrimaryButton.IsEnabled },
+                    check = new { enabled = CheckButton.IsEnabled },
+                    repair = new { enabled = RepairButton.IsEnabled },
+                    uninstall = new { enabled = UninstallButton.IsEnabled },
+                    plugins = new { enabled = OpenPluginsButton.IsEnabled },
+                    installFolder = new { enabled = OpenInstallButton.IsEnabled },
+                    managerUpdate = new
+                    {
+                        visible = ManagerUpdateButton.Visibility == Visibility.Visible,
+                        label = ManagerUpdateButton.Content?.ToString() ?? "Update manager",
+                        enabled = ManagerUpdateButton.IsEnabled
+                    }
+                },
+                progress = new
+                {
+                    message = ProgressText.Text,
+                    value = OperationProgressBar.Value,
+                    indeterminate = OperationProgressBar.IsIndeterminate
+                },
+                busy = _busy,
+                log = ActivityLogText.Text
+            };
+
+            PostWebMessage(new { type = "state", data = state });
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine("Could not synchronize React dashboard state: " + ex.Message);
+        }
+    }
+
+    private object BuildClientWebState(string branch, string status, string selectedBranch)
+    {
+        var found = _clientProbes.TryGetValue(branch, out var probe);
+        var tone = !found
+            ? "neutral"
+            : probe!.IsManagedPatch && !_installationService.HasUsableManagedPayload(probe)
+                ? "danger"
+                : probe.IsManagedPatch
+                    ? "success"
+                    : probe.IsPatched
+                        ? "warning"
+                        : "accent";
+
+        return new
+        {
+            label = DisplayBranch(branch),
+            status,
+            tone,
+            selected = branch.Equals(selectedBranch, StringComparison.OrdinalIgnoreCase),
+            found
+        };
+    }
+
+    private void PostWebMessage(object payload)
+    {
+        if (!_webUiReady || WebDashboard.CoreWebView2 is null) return;
+        WebDashboard.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(payload));
+    }
+
+    private static string ToneName(DialogTone tone) => tone switch
+    {
+        DialogTone.Success => "success",
+        DialogTone.Warning => "warning",
+        DialogTone.Danger => "danger",
+        _ => "accent"
+    };
 
     private async Task<bool> RecoverInterruptedOperationsAsync()
     {
@@ -93,6 +431,8 @@ public partial class MainWindow : Window
             CompositionTarget.Rendering -= SmoothScroll_Rendering;
             _smoothScrollRenderingSubscribed = false;
         }
+        try { WebDashboard.Dispose(); }
+        catch { }
         _installationService.Dispose();
     }
 
@@ -106,10 +446,11 @@ public partial class MainWindow : Window
 
     private void Window_StateChanged(object? sender, EventArgs e)
     {
-        var maximized = WindowState == WindowState.Maximized;
-        MaximizeWindowButton.Content = maximized ? "\uE923" : "\uE922";
-        WindowBorder.CornerRadius = maximized ? new CornerRadius(0) : new CornerRadius(12);
-        WindowBorder.BorderThickness = maximized ? new Thickness(0) : new Thickness(1);
+        if (WindowState == WindowState.Maximized)
+            WindowState = WindowState.Normal;
+
+        WindowBorder.CornerRadius = new CornerRadius(12);
+        WindowBorder.BorderThickness = new Thickness(1);
     }
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
@@ -124,26 +465,14 @@ public partial class MainWindow : Window
     private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ChangedButton != MouseButton.Left) return;
-
-        if (e.ClickCount == 2)
-        {
-            ToggleMaximize();
-            return;
-        }
-
-        if (WindowState == WindowState.Maximized)
-            return;
+        if (e.ClickCount > 1) return;
 
         try { DragMove(); }
         catch (InvalidOperationException) { }
     }
 
     private void MinimizeButton_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
-    private void MaximizeButton_Click(object sender, RoutedEventArgs e) => ToggleMaximize();
     private void CloseButton_Click(object sender, RoutedEventArgs e) => Close();
-
-    private void ToggleMaximize() =>
-        WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
 
     private async void CheckButton_Click(object sender, RoutedEventArgs e) =>
         await CheckForUpdatesAsync(showSuccessDialog: true);
@@ -389,6 +718,8 @@ public partial class MainWindow : Window
                 OperationProgressBar.IsIndeterminate = true;
             }
 
+            SendWebState();
+
             if (!string.Equals(_lastProgressMessage, value.Message, StringComparison.Ordinal))
             {
                 _lastProgressMessage = value.Message;
@@ -456,6 +787,7 @@ public partial class MainWindow : Window
 
         SelectedChannelText.Text = SelectedChannelLabel();
         RefreshClientStatusIndicators();
+        RefreshSelectedClientRow();
 
         InstalledVersionText.Text = installed
             ? $"v{selectedVersion}"
@@ -607,6 +939,7 @@ public partial class MainWindow : Window
         OpenPluginsButton.IsEnabled = !_busy;
         OpenInstallButton.IsEnabled = !_busy && _installationService.HasAnyManagedFiles();
         SetBranchControlsEnabled(!_busy);
+        SendWebState();
     }
 
     private void VerifyLocalInstallation(bool logResult)
@@ -703,6 +1036,31 @@ public partial class MainWindow : Window
         SetClientStatus("stable", StableClientDot, StableClientStatusBadge, StableClientStatusText);
         SetClientStatus("ptb", PtbClientDot, PtbClientStatusBadge, PtbClientStatusText);
         SetClientStatus("canary", CanaryClientDot, CanaryClientStatusBadge, CanaryClientStatusText);
+    }
+
+    private void RefreshSelectedClientRow()
+    {
+        foreach (var row in new[] { StableClientRow, PtbClientRow, CanaryClientRow })
+        {
+            row.Background = ClientRowBrush;
+            row.BorderBrush = ClientRowBorderBrush;
+        }
+
+        var selected = SelectedBranch();
+        if (selected.Equals("auto", StringComparison.OrdinalIgnoreCase))
+            selected = _localProbe?.Branch ?? string.Empty;
+
+        var selectedRow = selected switch
+        {
+            "stable" => StableClientRow,
+            "ptb" => PtbClientRow,
+            "canary" => CanaryClientRow,
+            _ => null
+        };
+
+        if (selectedRow is null) return;
+        selectedRow.Background = SelectedClientRowBrush;
+        selectedRow.BorderBrush = AccentBorderBrush;
     }
 
     private void SetClientStatus(string branch, System.Windows.Shapes.Ellipse dot, Border badge, TextBlock text)
@@ -811,6 +1169,7 @@ public partial class MainWindow : Window
 
     private void SetStatusVisual(DialogTone tone)
     {
+        _currentStatusTone = tone;
         var (dot, background, border) = tone switch
         {
             DialogTone.Success => (SuccessBrush, SuccessSoftBrush, SuccessBorderBrush),
@@ -866,6 +1225,17 @@ public partial class MainWindow : Window
     private void SmoothScrollViewer_MouseWheel(object sender, MouseWheelEventArgs e)
     {
         if (sender is not ScrollViewer scrollViewer || scrollViewer.ScrollableHeight <= 0) return;
+
+        if (!SystemParameters.ClientAreaAnimation)
+        {
+            var immediateTarget = Math.Clamp(
+                scrollViewer.VerticalOffset - (e.Delta * WheelScrollMultiplier),
+                0,
+                scrollViewer.ScrollableHeight);
+            scrollViewer.ScrollToVerticalOffset(immediateTarget);
+            e.Handled = true;
+            return;
+        }
 
         if (!_smoothScrollStates.TryGetValue(scrollViewer, out var state))
         {
@@ -937,7 +1307,36 @@ public partial class MainWindow : Window
             var line = $"[{DateTime.Now:HH:mm:ss}] {message}";
             ActivityLogText.Text += (ActivityLogText.Text.Length == 0 ? string.Empty : Environment.NewLine) + line;
             ActivityScrollViewer.ScrollToEnd();
+            SendWebState();
         });
+    }
+
+    private void CopyActivityButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(ActivityLogText.Text))
+        {
+            ProgressText.Text = "Nothing to copy";
+            return;
+        }
+
+        try
+        {
+            Clipboard.SetText(ActivityLogText.Text);
+            ProgressText.Text = "Activity copied";
+            SendWebState();
+        }
+        catch
+        {
+            ProgressText.Text = "Could not copy activity";
+            SendWebState();
+        }
+    }
+
+    private void ClearActivityButton_Click(object sender, RoutedEventArgs e)
+    {
+        ActivityLogText.Text = string.Empty;
+        ProgressText.Text = _busy ? "Operation in progress" : "Activity cleared";
+        SendWebState();
     }
 
     private sealed class SmoothScrollState
@@ -958,12 +1357,33 @@ public partial class MainWindow : Window
         if (_dialogCompletion is not null)
             CompleteDialog(false);
 
+        _dialogPreviousFocus = Keyboard.FocusedElement;
         _dialogCompletion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        if (_webUiReady && WebDashboard.CoreWebView2 is not null)
+        {
+            _webDialogActive = true;
+            _webDialogId = Guid.NewGuid().ToString("N");
+            PostWebMessage(new
+            {
+                type = "dialog",
+                id = _webDialogId,
+                title,
+                message,
+                confirmText,
+                showCancel,
+                tone = ToneName(tone)
+            });
+            return _dialogCompletion.Task;
+        }
+
         DialogTitle.Text = title;
         DialogMessage.Text = message;
         DialogConfirmButton.Content = confirmText;
         DialogCancelButton.Visibility = showCancel ? Visibility.Visible : Visibility.Collapsed;
         DialogConfirmButton.Style = (Style)FindResource(tone == DialogTone.Danger ? "DangerButton" : "PrimaryButton");
+        DialogConfirmButton.IsDefault = tone != DialogTone.Danger;
+        DialogCancelButton.IsDefault = tone == DialogTone.Danger && showCancel;
 
         switch (tone)
         {
@@ -990,8 +1410,38 @@ public partial class MainWindow : Window
         }
 
         DialogOverlay.Visibility = Visibility.Visible;
-        DialogConfirmButton.Focus();
+        PlayDialogEntrance();
+        if (tone == DialogTone.Danger && showCancel)
+            DialogCancelButton.Focus();
+        else
+            DialogConfirmButton.Focus();
         return _dialogCompletion.Task;
+    }
+
+    private void PlayDialogEntrance()
+    {
+        DialogPanel.BeginAnimation(OpacityProperty, null);
+        DialogScale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+        DialogScale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+
+        if (!SystemParameters.ClientAreaAnimation)
+        {
+            DialogPanel.Opacity = 1;
+            DialogScale.ScaleX = 1;
+            DialogScale.ScaleY = 1;
+            return;
+        }
+
+        DialogPanel.RenderTransformOrigin = new Point(0.5, 0.5);
+        DialogPanel.Opacity = 0;
+        DialogScale.ScaleX = 0.985;
+        DialogScale.ScaleY = 0.985;
+
+        var duration = new Duration(TimeSpan.FromMilliseconds(125));
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        DialogPanel.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, duration) { EasingFunction = ease });
+        DialogScale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(0.985, 1, duration) { EasingFunction = ease });
+        DialogScale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(0.985, 1, duration) { EasingFunction = ease });
     }
 
     private void DialogConfirmButton_Click(object sender, RoutedEventArgs e) => CompleteDialog(true);
@@ -1002,7 +1452,27 @@ public partial class MainWindow : Window
         var completion = _dialogCompletion;
         if (completion is null) return;
         _dialogCompletion = null;
+
+        if (_webDialogActive)
+        {
+            _webDialogActive = false;
+            _webDialogId = null;
+            var previousWebFocus = _dialogPreviousFocus;
+            _dialogPreviousFocus = null;
+            if (previousWebFocus is not null)
+                Keyboard.Focus(previousWebFocus);
+            completion.TrySetResult(result);
+            return;
+        }
+
         DialogOverlay.Visibility = Visibility.Collapsed;
+        DialogPanel.BeginAnimation(OpacityProperty, null);
+        DialogScale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+        DialogScale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+        var previousFocus = _dialogPreviousFocus;
+        _dialogPreviousFocus = null;
+        if (previousFocus is not null)
+            Keyboard.Focus(previousFocus);
         completion.TrySetResult(result);
     }
 

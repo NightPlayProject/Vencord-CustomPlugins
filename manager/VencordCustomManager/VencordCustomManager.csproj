@@ -8,9 +8,9 @@
     <UseWPF>true</UseWPF>
     <AssemblyName>VencordCustomManager</AssemblyName>
     <RootNamespace>VencordCustomManager</RootNamespace>
-    <Version>0.1.4</Version>
-    <AssemblyVersion>0.1.4.0</AssemblyVersion>
-    <FileVersion>0.1.4.0</FileVersion>
+    <Version>0.1.5</Version>
+    <AssemblyVersion>0.1.5.0</AssemblyVersion>
+    <FileVersion>0.1.5.0</FileVersion>
     <Product>Custom Vencord Manager</Product>
     <Company>Custom Vencord</Company>
     <Description>Installer and updater for the Custom Vencord Plugins distribution.</Description>
@@ -21,5 +21,20 @@
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\WebUi\dist\**\*">
+      <LogicalName>WebUi/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <Target Name="EnsureWebUiAssets" BeforeTargets="PrepareResources">
+    <Error Condition="!Exists('..\WebUi\dist\index.html')"
+           Text="The embedded React dashboard has not been built. Run npm ci and npm run build in manager\WebUi before building the manager." />
+  </Target>
 
 </Project>
