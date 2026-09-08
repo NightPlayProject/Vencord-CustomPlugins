@@ -25,6 +25,28 @@ The updater should:
 
 The release version, URLs and hashes must be updated together for every publication.
 
+## Distribution release preflight
+
+Build the payload from the Vencord source tree with the declared pnpm version and the exact distribution flags:
+
+```powershell
+npx -y pnpm@11.9.0 build --standalone --disable-updater
+```
+
+The release archive must also contain a non-empty `dist\package.json` (the current distribution uses `{}`). The Vencord build itself does not create this file.
+
+Before any GitHub release is published or the manifest is changed, validate the exact ZIP that will be uploaded:
+
+```powershell
+.\scripts\validate-distribution.ps1 `
+  -ZipPath <release-zip> `
+  -ExpectedOrion <orion-version> `
+  -ExpectedVencordVersion <vencord-version> `
+  -ExpectedVencordCommit <vencord-commit>
+```
+
+This preflight mirrors the manager's managed-payload integrity file set, rejects empty or missing files, rejects accidental `dist\dist` nesting, parses `dist\package.json`, and checks the payload README metadata. A release must not be advertised until this validation and an install/verify/uninstall isolation test both pass.
+
 ## Manager updates
 
 The manifest can also contain a top-level `manager` object with its own version, download URL and SHA-256. When that version is newer than the running manager, the UI offers a manager update. The replacement executable is downloaded and verified first, then a short-lived helper replaces the manager after the current process exits and starts the new build.

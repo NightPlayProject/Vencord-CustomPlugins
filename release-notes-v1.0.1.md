@@ -1,6 +1,8 @@
 # v1.0.1
 
-Payload update for existing Custom Vencord installations.
+> **WITHDRAWN.** This release's payload ZIP was packaged incorrectly and omitted `dist/package.json`, so manager integrity verification rejected it. The broken install ZIP has been removed. Use v1.0.0 until the corrected v1.0.2 release is available.
+
+The intended payload changes were:
 
 - OrionQuests updated from **v4.10.12** to **v4.10.13** (upstream `8eab919d`).
 - Fixes the unrunnable-quest rescan loop: quests this Discord client cannot drive are skipped for the rest of that Orion run instead of being rediscovered every cycle.
