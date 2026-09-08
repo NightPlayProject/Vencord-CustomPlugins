@@ -31,7 +31,7 @@ import {
 import "./styles.css";
 
 const initialState = {
-  managerVersion: "0.1.5",
+  managerVersion: "0.1.6",
   statusText: "Loading manager state…",
   statusTone: "accent",
   selectedBranch: "stable",
@@ -283,6 +283,7 @@ function App() {
   const [state, setState] = useState(initialState);
   const [dialog, setDialog] = useState(null);
   const [logExpanded, setLogExpanded] = useState(true);
+  const [hasNativeState, setHasNativeState] = useState(false);
   const logRef = useRef(null);
   const reduceMotion = useReducedMotion();
 
@@ -295,13 +296,22 @@ function App() {
     const handler = event => {
       const message = event.data;
       if (!message || typeof message !== "object") return;
-      if (message.type === "state") setState(message.data);
+      if (message.type === "state") {
+        setState(message.data);
+        setHasNativeState(true);
+      }
       if (message.type === "dialog") setDialog(message);
     };
     webview.addEventListener("message", handler);
     nativePost({ type: "ready" });
     return () => webview.removeEventListener("message", handler);
   }, []);
+
+  useEffect(() => {
+    if (!hasNativeState) return;
+    const frame = requestAnimationFrame(() => nativePost({ type: "rendered" }));
+    return () => cancelAnimationFrame(frame);
+  }, [hasNativeState]);
 
   useEffect(() => {
     if (!logExpanded) return;
@@ -336,6 +346,22 @@ function App() {
     nativePost({ type: "dialogResult", id: dialog.id, result });
     setDialog(null);
   };
+
+  if (window.chrome?.webview && !hasNativeState) {
+    return (
+      <main className="grid h-full w-full place-items-center bg-[#050505] text-zinc-100">
+        <div className="flex flex-col items-center">
+          <div className="grid h-[42px] w-[42px] place-items-center rounded-[15px] border border-white/[0.10] bg-[#101010]">
+            <Zap size={18} className="text-zinc-100" strokeWidth={1.9} />
+          </div>
+          <div className="mt-3 text-[11px] font-semibold text-zinc-400">Loading dashboard</div>
+          <div className="mt-3 h-0.5 w-[74px] overflow-hidden rounded-full bg-zinc-900">
+            <div className="h-full w-[38%] rounded-full bg-zinc-300" />
+          </div>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="relative h-full w-full overflow-hidden text-zinc-100 selection:bg-white/15">

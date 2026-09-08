@@ -1,7 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Reflection;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Windows;
@@ -28,6 +27,8 @@ public partial class MainWindow : Window
     private TaskCompletionSource<bool>? _dialogCompletion;
     private IInputElement? _dialogPreviousFocus;
     private bool _webUiReady;
+    private TaskCompletionSource<bool>? _webUiReadyCompletion;
+    private Task? _webUiInitializationTask;
     private bool _webDialogActive;
     private string? _webDialogId;
     private DialogTone _currentStatusTone = DialogTone.Accent;
@@ -57,6 +58,12 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+
+        // Start WebView2 environment creation immediately so its comparatively expensive
+        // runtime startup overlaps the native state/probe work and initial window layout.
+        // Window_Loaded still awaits this same task before recovery/update work continues.
+        _webUiInitializationTask = InitializeWebUiAsync();
+
         _state = _installationService.LoadState();
         ApplySavedBranch();
         if (_installationService.GetPendingRecoveryBranches().Count == 0)
@@ -68,7 +75,7 @@ public partial class MainWindow : Window
 
     private async void Window_Loaded(object sender, RoutedEventArgs e)
     {
-        await InitializeWebUiAsync();
+        await (_webUiInitializationTask ??= InitializeWebUiAsync());
         AppendLog($"Custom Vencord Manager v{AppInfo.CurrentVersion} started.");
         AppendLog("Managed installation storage ready.");
         await RecoverInterruptedOperationsAsync();
@@ -77,6 +84,13 @@ public partial class MainWindow : Window
 
     private async Task InitializeWebUiAsync()
     {
+        var startupTimer = Stopwatch.StartNew();
+        _webUiReady = false;
+        _webUiReadyCompletion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        StartupSurface.Visibility = Visibility.Visible;
+        LegacyDashboard.Visibility = Visibility.Collapsed;
+        WebDashboard.Visibility = Visibility.Collapsed;
+
         try
         {
             ManagerPaths.EnsureCreated();
@@ -126,12 +140,18 @@ public partial class MainWindow : Window
                 if (!args.IsSuccess)
                 {
                     AppendLog($"React dashboard load failed: {args.WebErrorStatus}.");
+                    _webUiReadyCompletion?.TrySetException(
+                        new InvalidOperationException($"React dashboard navigation failed: {args.WebErrorStatus}."));
                     return;
                 }
+
+                // A successfully navigated React document paints its own ReUI-black
+                // loading surface until the first native state snapshot is applied.
+                // Showing it here lets WebView2 run normally without ever exposing
+                // the legacy WPF dashboard during a healthy startup.
                 WebDashboard.Visibility = Visibility.Visible;
+                StartupSurface.Visibility = Visibility.Collapsed;
                 LegacyDashboard.Visibility = Visibility.Collapsed;
-                AppendLog("React + Tailwind dashboard loaded.");
-                SendWebState();
             };
 
             core.SetVirtualHostNameToFolderMapping(
@@ -139,10 +159,14 @@ public partial class MainWindow : Window
                 webRoot,
                 CoreWebView2HostResourceAccessKind.Allow);
             WebDashboard.Source = new Uri("https://manager.local/index.html");
+
+            await _webUiReadyCompletion.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            AppendLog($"React + Tailwind dashboard loaded in {startupTimer.ElapsedMilliseconds} ms.");
         }
         catch (Exception ex)
         {
             _webUiReady = false;
+            StartupSurface.Visibility = Visibility.Collapsed;
             LegacyDashboard.Visibility = Visibility.Visible;
             WebDashboard.Visibility = Visibility.Collapsed;
             Debug.WriteLine("React dashboard unavailable; using native fallback. " + ex);
@@ -154,6 +178,12 @@ public partial class MainWindow : Window
     {
         const string resourcePrefix = "WebUi/";
         var assembly = Assembly.GetExecutingAssembly();
+        var fingerprint = assembly.ManifestModule.ModuleVersionId.ToString("N")[..20].ToUpperInvariant();
+        var cacheRoot = Path.Combine(ManagerPaths.Root, "web-ui-cache");
+        var target = Path.Combine(cacheRoot, fingerprint);
+        var indexPath = Path.Combine(target, "index.html");
+        if (File.Exists(indexPath)) return target;
+
         var resourceNames = assembly.GetManifestResourceNames()
             .Where(name => name.StartsWith(resourcePrefix, StringComparison.Ordinal))
             .OrderBy(name => name, StringComparer.Ordinal)
@@ -163,7 +193,6 @@ public partial class MainWindow : Window
             throw new InvalidDataException("The embedded React dashboard is missing from this manager build.");
 
         var resources = new List<(string RelativePath, byte[] Data)>(resourceNames.Length);
-        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         foreach (var resourceName in resourceNames)
         {
             using var stream = assembly.GetManifestResourceStream(resourceName)
@@ -173,18 +202,8 @@ public partial class MainWindow : Window
             var data = memory.ToArray();
             var relative = resourceName[resourcePrefix.Length..].Replace('\\', '/');
             if (string.IsNullOrWhiteSpace(relative)) continue;
-
-            var nameBytes = Encoding.UTF8.GetBytes(relative);
-            hash.AppendData(nameBytes);
-            hash.AppendData(data);
             resources.Add((relative, data));
         }
-
-        var fingerprint = Convert.ToHexString(hash.GetHashAndReset())[..20];
-        var cacheRoot = Path.Combine(ManagerPaths.Root, "web-ui-cache");
-        var target = Path.Combine(cacheRoot, fingerprint);
-        var indexPath = Path.Combine(target, "index.html");
-        if (File.Exists(indexPath)) return target;
 
         Directory.CreateDirectory(cacheRoot);
         var staging = Path.Combine(cacheRoot, $".{fingerprint}.staging-{Guid.NewGuid():N}");
@@ -235,6 +254,13 @@ public partial class MainWindow : Window
                 case "ready":
                     _webUiReady = true;
                     SendWebState();
+                    break;
+                case "rendered":
+                    if (!_webUiReady) return;
+                    WebDashboard.Visibility = Visibility.Visible;
+                    StartupSurface.Visibility = Visibility.Collapsed;
+                    LegacyDashboard.Visibility = Visibility.Collapsed;
+                    _webUiReadyCompletion?.TrySetResult(true);
                     break;
                 case "selectBranch":
                     if (root.TryGetProperty("branch", out var branchNode))
