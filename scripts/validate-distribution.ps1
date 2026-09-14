@@ -104,7 +104,20 @@ finally {
     $archive.Dispose()
 }
 
-$hash = (Get-FileHash -LiteralPath $resolvedZip -Algorithm SHA256).Hash
+$sha256 = [Security.Cryptography.SHA256]::Create()
+try {
+    $stream = [IO.File]::OpenRead($resolvedZip)
+    try {
+        $hashBytes = $sha256.ComputeHash($stream)
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+finally {
+    $sha256.Dispose()
+}
+$hash = -join ($hashBytes | ForEach-Object { $_.ToString("X2") })
 $size = (Get-Item -LiteralPath $resolvedZip).Length
 Write-Host "RELEASE_VALIDATION=PASS"
 Write-Host "ZIP=$resolvedZip"
