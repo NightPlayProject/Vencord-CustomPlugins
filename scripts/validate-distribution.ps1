@@ -23,15 +23,15 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $required = @(
     # Keep this in sync with InstallationService.IntegrityFiles.
-    "dist\package.json",
-    "dist\patcher.js",
-    "dist\preload.js",
-    "dist\renderer.js",
-    "dist\renderer.css",
-    "dist\vencordDesktopMain.js",
-    "dist\vencordDesktopPreload.js",
-    "dist\vencordDesktopRenderer.js",
-    "dist\vencordDesktopRenderer.css",
+    "dist/package.json",
+    "dist/patcher.js",
+    "dist/preload.js",
+    "dist/renderer.js",
+    "dist/renderer.css",
+    "dist/vencordDesktopMain.js",
+    "dist/vencordDesktopPreload.js",
+    "dist/vencordDesktopRenderer.js",
+    "dist/vencordDesktopRenderer.css",
     "README.md",
     # ValidatePackage requires install.bat before any Discord mutation.
     "install.bat"
@@ -52,12 +52,12 @@ try {
         }
     }
 
-    $nestedDist = $archive.Entries | Where-Object { $_.FullName -like "dist\dist\*" } | Select-Object -First 1
+    $nestedDist = $archive.Entries | Where-Object { $_.FullName -like "dist/dist/*" } | Select-Object -First 1
     if ($null -ne $nestedDist) {
         $failures.Add("unexpected nested dist directory: $($nestedDist.FullName)")
     }
 
-    $packageEntry = $archive.GetEntry("dist\package.json")
+    $packageEntry = $archive.GetEntry("dist/package.json")
     if ($null -ne $packageEntry -and $packageEntry.Length -gt 0) {
         $reader = New-Object IO.StreamReader($packageEntry.Open())
         try {
