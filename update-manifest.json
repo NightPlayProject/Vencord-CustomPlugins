@@ -1,13 +1,13 @@
 ﻿{
     "schema":  1,
     "channel":  "stable",
-    "version":  "1.0.3",
-    "published_at":  "2026-09-14T03:19:50Z",
-    "release_page":  "https://github.com/NightPlayProject/Vencord-CustomPlugins/releases/tag/v1.0.3",
+    "version":  "1.0.4",
+    "published_at":  "2026-09-19T20:45:43Z",
+    "release_page":  "https://github.com/NightPlayProject/Vencord-CustomPlugins/releases/tag/v1.0.4",
     "components":  {
                        "vencord":  {
-                                       "version":  "1.15.5",
-                                       "commit":  "0850f37fbb1623aa6330764d8f4b1e0b2617dcdf"
+                                       "version":  "1.15.6",
+                                       "commit":  "59a54286542651fff5ea53f0ce6cadf2a6aa7521"
                                    },
                        "orion_quests":  "4.11.2",
                        "nitro_sniper":  "bundled",
@@ -16,20 +16,20 @@
     "assets":  {
                    "windows_release":  {
                                            "name":  "Vencord-CustomPlugins-release.zip",
-                                           "url":  "https://github.com/NightPlayProject/Vencord-CustomPlugins/releases/download/v1.0.3/Vencord-CustomPlugins-release.zip",
-                                           "sha256":  "5D1FC0F3D40C128C9B7C0BD404692800E97BD1599B89C6A8EF321FD89A381AF4"
+                                           "url":  "https://github.com/NightPlayProject/Vencord-CustomPlugins/releases/download/v1.0.4/Vencord-CustomPlugins-release.zip",
+                                           "sha256":  "FBDEF3D8EBE9C40E459672DC700FEDF4D823BDD441503446F2E510FC97502114"
                                        },
                    "source":  {
                                   "name":  "Vencord-CustomPlugins-source.zip",
-                                  "url":  "https://github.com/NightPlayProject/Vencord-CustomPlugins/releases/download/v1.0.3/Vencord-CustomPlugins-source.zip",
-                                  "sha256":  "CE74B20BABC0CDA5433F696DD07935EDE950214C6B73175C5ACBF6D625093239"
+                                  "url":  "https://github.com/NightPlayProject/Vencord-CustomPlugins/releases/download/v1.0.4/Vencord-CustomPlugins-source.zip",
+                                  "sha256":  "FD16EFE8281E9B024E911BE8A8B18BC5E323881025EF565145464E4891F47BE0"
                               }
                },
     "manager":  {
                     "version":  "0.1.7",
                     "asset":  {
                                   "name":  "VencordCustomManager-v0.1.7.exe",
-                                  "url":  "https://github.com/NightPlayProject/Vencord-CustomPlugins/releases/download/v1.0.3/VencordCustomManager-v0.1.7.exe",
+                                  "url":  "https://github.com/NightPlayProject/Vencord-CustomPlugins/releases/download/v1.0.4/VencordCustomManager-v0.1.7.exe",
                                   "sha256":  "795B960D0C70C81C06B11DE66CAF1E8F69A141E342F0B1777D1ABF8661504AF5"
                               }
                 }
