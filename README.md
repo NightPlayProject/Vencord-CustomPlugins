@@ -33,10 +33,10 @@ Once the manager is installed, future releases are discovered through `update-ma
 
 ## Current release
 
-- Distribution: **v1.0.2**
+- Distribution: **v1.0.5**
 - Custom Vencord Manager: **v0.1.7**
-- Vencord base: **1.15.4** (`0e40e433`)
-- OrionQuests: **v4.10.13**
+- Vencord base: **1.15.10** (`718c8672`)
+- OrionQuests: **v4.11.5** (`38b6f84`)
 - Runtime custom-plugin loader: included
 - NitroSniper: included
 

@@ -96,6 +96,25 @@ try {
         }
     }
 
+    # Check the executable bundles themselves; README and manifest labels alone can be stale.
+    foreach ($bundlePath in @("dist/renderer.js", "dist/vencordDesktopRenderer.js")) {
+        $bundleEntry = $archive.GetEntry($bundlePath)
+        if ($null -eq $bundleEntry -or $bundleEntry.Length -le 0) { continue }
+        $reader = New-Object IO.StreamReader($bundleEntry.Open())
+        try {
+            $bundle = $reader.ReadToEnd()
+        }
+        finally {
+            $reader.Dispose()
+        }
+
+        foreach ($marker in @("OrionQuests", "v$ExpectedOrion", "NitroSniper", "CustomPlugins", "customPlugins.get")) {
+            if (-not $bundle.Contains($marker)) {
+                $failures.Add("${bundlePath} does not contain expected bundled component: $marker")
+            }
+        }
+    }
+
     if ($failures.Count -gt 0) {
         throw ("Release validation failed:`r`n - " + ($failures -join "`r`n - "))
     }
