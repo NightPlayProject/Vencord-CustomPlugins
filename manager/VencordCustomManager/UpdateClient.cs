@@ -7,7 +7,7 @@ namespace VencordCustomManager;
 
 public sealed class UpdateClient : IDisposable
 {
-    public const string ManifestUrl = "https://raw.githubusercontent.com/NightPlayProject/Vencord-CustomPlugins/main/update-manifest.json";
+    public const string ManifestUrl = "https://raw.githubusercontent.com/RealChroma/Vencord-CustomPlugins/main/update-manifest.json";
 
     private readonly HttpClient _httpClient;
 

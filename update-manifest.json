@@ -3,7 +3,7 @@
     "channel":  "stable",
     "version":  "1.0.6",
     "published_at":  "2026-10-16T21:08:06Z",
-    "release_page":  "https://github.com/NightPlayProject/Vencord-CustomPlugins/releases/tag/v1.0.6",
+    "release_page":  "https://github.com/RealChroma/Vencord-CustomPlugins/releases/tag/v1.0.6",
     "components":  {
                        "vencord":  {
                                        "version":  "1.15.11",
@@ -16,12 +16,12 @@
     "assets":  {
                    "windows_release":  {
                                            "name":  "Vencord-CustomPlugins-release.zip",
-                                           "url":  "https://github.com/NightPlayProject/Vencord-CustomPlugins/releases/download/v1.0.6/Vencord-CustomPlugins-release.zip",
+                                           "url":  "https://github.com/RealChroma/Vencord-CustomPlugins/releases/download/v1.0.6/Vencord-CustomPlugins-release.zip",
                                            "sha256":  "78A2562AD2C5552929DE94094EA43571B8D278C8A9B149D05302BC3DDB312D67"
                                        },
                    "source":  {
                                   "name":  "Vencord-CustomPlugins-source.zip",
-                                  "url":  "https://github.com/NightPlayProject/Vencord-CustomPlugins/releases/download/v1.0.6/Vencord-CustomPlugins-source.zip",
+                                  "url":  "https://github.com/RealChroma/Vencord-CustomPlugins/releases/download/v1.0.6/Vencord-CustomPlugins-source.zip",
                                   "sha256":  "49AA1FD954CD197C118DDAF9ED48F51C4DBD4919F52D080137EE9CF4F4DC76E8"
                               }
                },
@@ -29,7 +29,7 @@
                     "version":  "0.1.7",
                     "asset":  {
                                   "name":  "VencordCustomManager-v0.1.7.exe",
-                                  "url":  "https://github.com/NightPlayProject/Vencord-CustomPlugins/releases/download/v1.0.6/VencordCustomManager-v0.1.7.exe",
+                                  "url":  "https://github.com/RealChroma/Vencord-CustomPlugins/releases/download/v1.0.6/VencordCustomManager-v0.1.7.exe",
                                   "sha256":  "795B960D0C70C81C06B11DE66CAF1E8F69A141E342F0B1777D1ABF8661504AF5"
                               }
                 }

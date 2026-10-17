@@ -619,7 +619,7 @@ public partial class MainWindow : Window
     {
         var url = _manifest?.ReleasePage;
         if (string.IsNullOrWhiteSpace(url))
-            url = "https://github.com/NightPlayProject/Vencord-CustomPlugins/releases/latest";
+            url = "https://github.com/RealChroma/Vencord-CustomPlugins/releases/latest";
         OpenUrl(url);
     }
 
